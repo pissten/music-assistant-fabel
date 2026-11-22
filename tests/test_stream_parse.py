@@ -1,12 +1,16 @@
 """Unit tests for streamV2 response parsing (no network)."""
 
+from __future__ import annotations
+
+from typing import Any
 from urllib.parse import unquote
 
 
-def _parse(stream: dict) -> tuple[str, dict[str, str], int]:
+def _parse(stream: dict[str, Any]) -> tuple[str, dict[str, str], int]:
     """Mirror of FabelApi.parse_stream_response without importing MA deps."""
     base = str(stream.get("url") or "").strip()
-    token = stream.get("token") if isinstance(stream.get("token"), dict) else {}
+    raw_token = stream.get("token")
+    token: dict[str, Any] = raw_token if isinstance(raw_token, dict) else {}
     mac = str(token.get("mac") or "").strip()
     timestamp = token.get("timestamp")
     headers = {"User-Agent": "okhttp/4.12.0", "Accept": "*/*"}

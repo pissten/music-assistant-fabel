@@ -10,7 +10,7 @@ Streams via ``/api/book/{isbn}/streamV2`` → progressive ``.webm`` (Opus) on
 from __future__ import annotations
 
 from collections.abc import AsyncGenerator, Sequence
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from music_assistant_models.enums import (
     ContentType,
@@ -209,9 +209,10 @@ class FabelProvider(MusicProvider):
             subpath = path_parts[1].strip("/")
 
         if not subpath:
-            folders: list[BrowseFolder] = []
             # Standard library audiobooks folder from the base implementation
-            folders.extend(await super().browse(path))
+            folders: list[BrowseFolder] = [
+                item for item in await super().browse(path) if isinstance(item, BrowseFolder)
+            ]
             root = path if path.endswith(("://", "/")) else f"{path.rstrip('/')}/"
             if "://" not in root:
                 root = f"{self.instance_id}://"
@@ -244,7 +245,10 @@ class FabelProvider(MusicProvider):
                     books.append(book)
             return books
 
-        return await super().browse(path)
+        return cast(
+            "Sequence[MediaItemType | BrowseFolder]",
+            await super().browse(path),
+        )
 
     async def get_stream_details(self, item_id: str, media_type: MediaType) -> StreamDetails:
         """Resolve stream details for a Fabel audiobook."""
@@ -260,8 +264,9 @@ class FabelProvider(MusicProvider):
 
         cdn_url, cdn_headers, duration = self._api.parse_stream_response(stream)
         # Progressive WebM/Opus (Media3 ProgressiveMediaPeriod + HTTP 206).
-        content_type = getattr(ContentType, "OGG", None) or getattr(
-            ContentType, "UNKNOWN", ContentType.UNKNOWN
+        content_type = cast(
+            "ContentType",
+            getattr(ContentType, "OGG", ContentType.UNKNOWN),
         )
         # ffmpeg needs CDN auth as request headers (not query string).
         header_lines = "".join(f"{k}: {v}\r\n" for k, v in cdn_headers.items())

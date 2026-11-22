@@ -291,7 +291,8 @@ class FabelApi:
 
     async def get_me(self) -> dict[str, Any]:
         """Return the authenticated user profile root."""
-        return await self.request_json("GET", EP_ME)
+        payload = await self.request_json("GET", EP_ME)
+        return payload if isinstance(payload, dict) else {}
 
     async def get_profiles(self) -> list[dict[str, Any]]:
         """Return listening profiles for the account."""
@@ -358,7 +359,8 @@ class FabelApi:
 
     async def get_book(self, isbn: str) -> dict[str, Any]:
         """Return book metadata by ISBN."""
-        return await self.request_json("GET", EP_BOOK.format(isbn=isbn), require_profile=True)
+        payload = await self.request_json("GET", EP_BOOK.format(isbn=isbn), require_profile=True)
+        return payload if isinstance(payload, dict) else {}
 
     async def can_listen(self, isbn: str) -> Any:
         """Return whether the current profile may stream this ISBN."""
@@ -374,18 +376,20 @@ class FabelApi:
         Response: ``{url, duration, token:{mac,timestamp}}``.
         """
         path = EP_BOOK_STREAM_V2.format(isbn=isbn)
-        return await self.request_json(
+        payload = await self.request_json(
             "GET",
             path,
             params={"platform": "android"},
             require_profile=True,
         )
+        return payload if isinstance(payload, dict) else {}
 
     @staticmethod
     def parse_stream_response(stream: dict[str, Any]) -> tuple[str, dict[str, str], int]:
         """Parse streamV2 JSON into CDN URL, request headers, and duration."""
         base = str(stream.get("url") or "").strip()
-        token = stream.get("token") if isinstance(stream.get("token"), dict) else {}
+        raw_token = stream.get("token")
+        token: dict[str, Any] = raw_token if isinstance(raw_token, dict) else {}
         mac = str(token.get("mac") or "").strip()
         timestamp = token.get("timestamp")
         if not base:

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from music_assistant_models.config_entries import ConfigEntry, ConfigValueOption
 from music_assistant_models.enums import ConfigEntryType
@@ -78,11 +78,12 @@ async def run_setup(session: SetupSession) -> None:  # noqa: C901, PLR0915
             errors = {"base": str(err)}
 
     # --- Step 2: SMS code ---
+    profiles: list[dict[str, Any]] = []
     while True:
         otp_entry = replace(_OTP_ENTRY, value="")
         submitted = await session.form([otp_entry], step_id="otp", errors=errors, last_step=False)
         setup_data.update(submitted)
-        raw_code = submitted.get(CONF_OTP_CODE, setup_data.get(CONF_OTP_CODE))
+        raw_code = str(submitted.get(CONF_OTP_CODE, setup_data.get(CONF_OTP_CODE)) or "")
         phone = str(
             setup_data.get(CONF_PHONE_NUMBER)
             or session.context.setup_data.get(CONF_PHONE_NUMBER)
