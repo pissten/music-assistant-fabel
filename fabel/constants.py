@@ -44,6 +44,6 @@ EP_AUTH_TOKEN = "/auth/token"  # noqa: S105
 EP_AUTH_INITIATE_SIGNIN = "/auth/initiate-signin"
 EP_AUTH_COMPLETE_SIGNIN = "/auth/complete-signin"
 
-USER_AGENT = "MusicAssistant-Fabel/0.1.4 (compatible; Fabel/2.1.6)"
+USER_AGENT = "MusicAssistant-Fabel/0.1.5 (compatible; Fabel/2.1.6)"
 # Match official app for CDN / auth
 CDN_USER_AGENT = "okhttp/4.12.0"

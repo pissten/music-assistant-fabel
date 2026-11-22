@@ -30,7 +30,7 @@ _PHONE_ENTRY = ConfigEntry(
     type=ConfigEntryType.STRING,
     required=True,
     label="Mobilnummer",
-    description="Samme norske mobilnummer som i Fabel-appen (8 siffer eller +47…).",
+    description="Norsk mobilnummer brukt i Fabel-appen (8 siffer eller +47…).",
 )
 
 _OTP_ENTRY = ConfigEntry(
@@ -136,7 +136,7 @@ async def run_setup(session: SetupSession) -> None:  # noqa: C901, PLR0915
         type=ConfigEntryType.STRING,
         required=True,
         label="Lytteprofil",
-        description="Sendes som x-profile-id på stream og bibliotek.",
+        description="Brukes i header x-profile-id på stream og bibliotek.",
         options=options,
         default_value=preferred,
         value=existing if existing in {o.value for o in options} else preferred,
