@@ -667,41 +667,6 @@ wheels = [
 ]
 
 [[package]]
-name = "community-provider-template"
-version = "0.0.0"
-source = { virtual = "." }
-
-[package.dev-dependencies]
-dev = [
-    { name = "aiosendspin", extra = ["server"] },
-    { name = "av" },
-    { name = "codespell" },
-    { name = "music-assistant" },
-    { name = "mypy" },
-    { name = "pre-commit" },
-    { name = "pytest" },
-    { name = "pytest-aiohttp" },
-    { name = "pytest-timeout" },
-    { name = "ruff" },
-]
-
-[package.metadata]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "aiosendspin", extras = ["server"], specifier = "==10.3.0" },
-    { name = "av", specifier = "==19.0.2" },
-    { name = "codespell", specifier = "==2.4.3" },
-    { name = "music-assistant", git = "https://github.com/music-assistant/server?rev=126c6d646ec14ee680e7051258e82dab0a09bac2" },
-    { name = "mypy", specifier = "==2.3.0" },
-    { name = "pre-commit", specifier = "==4.6.2" },
-    { name = "pytest", specifier = "==9.1.1" },
-    { name = "pytest-aiohttp", specifier = "==1.1.1" },
-    { name = "pytest-timeout", specifier = "==2.4.0" },
-    { name = "ruff", specifier = "==0.16.5" },
-]
-
-[[package]]
 name = "cpace"
 version = "0.1.0"
 source = { registry = "https://pypi.org/simple" }
@@ -788,6 +753,41 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/68/bc/d36966de7304047a1001a7559fbf266c464bb5d8cc85464536ef8c9bcc32/distlib-0.4.4.tar.gz", hash = "sha256:ca4175b4ac7f71223cc30ed7248c45d2b38c2439d8ee6e498ab67ed63cf3508d", size = 621304, upload-time = "2026-10-16T13:56:34.203Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/c1/2b/238f02a4927fa2e27aa995371d240a468b52e42eae44a678434aff736b38/distlib-0.4.4-py2.py3-none-any.whl", hash = "sha256:cf09d55b1e85a89576b036aeb71550bfd68320f3f21761ca329eadadad918638", size = 472099, upload-time = "2026-10-16T13:56:32.053Z" },
+]
+
+[[package]]
+name = "fabel"
+version = "0.1.0"
+source = { virtual = "." }
+
+[package.dev-dependencies]
+dev = [
+    { name = "aiosendspin", extra = ["server"] },
+    { name = "av" },
+    { name = "codespell" },
+    { name = "music-assistant" },
+    { name = "mypy" },
+    { name = "pre-commit" },
+    { name = "pytest" },
+    { name = "pytest-aiohttp" },
+    { name = "pytest-timeout" },
+    { name = "ruff" },
+]
+
+[package.metadata]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "aiosendspin", extras = ["server"], specifier = "==10.3.0" },
+    { name = "av", specifier = "==19.0.2" },
+    { name = "codespell", specifier = "==2.4.3" },
+    { name = "music-assistant", git = "https://github.com/music-assistant/server?rev=126c6d646ec14ee680e7051258e82dab0a09bac2" },
+    { name = "mypy", specifier = "==2.3.0" },
+    { name = "pre-commit", specifier = "==4.6.2" },
+    { name = "pytest", specifier = "==9.1.1" },
+    { name = "pytest-aiohttp", specifier = "==1.1.1" },
+    { name = "pytest-timeout", specifier = "==2.4.0" },
+    { name = "ruff", specifier = "==0.16.5" },
 ]
 
 [[package]]
