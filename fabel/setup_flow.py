@@ -42,7 +42,7 @@ _OTP_ENTRY = ConfigEntry(
 )
 
 
-async def run_setup(session: SetupSession) -> None:
+async def run_setup(session: SetupSession) -> None:  # noqa: C901, PLR0915
     """Phone → SMS OTP → Eventyr tokens → pick profile."""
     errors: dict[str, str] | None = None
     setup_data = dict(session.context.setup_data)
@@ -61,7 +61,7 @@ async def run_setup(session: SetupSession) -> None:
             errors = {"base": "oppgi_mobilnummer"}
             continue
 
-        api = FabelApi(session.mass.http_session, access_token="pending")
+        api = FabelApi(session.mass.http_session, access_token="pending")  # noqa: S106
         try:
             state = await api.request_sms_otp(phone)
             setup_data[CONF_PHONE_NUMBER] = api.normalize_phone(phone)
@@ -80,9 +80,7 @@ async def run_setup(session: SetupSession) -> None:
     # --- Step 2: SMS code ---
     while True:
         otp_entry = replace(_OTP_ENTRY, value="")
-        submitted = await session.form(
-            [otp_entry], step_id="otp", errors=errors, last_step=False
-        )
+        submitted = await session.form([otp_entry], step_id="otp", errors=errors, last_step=False)
         setup_data.update(submitted)
         raw_code = submitted.get(CONF_OTP_CODE, setup_data.get(CONF_OTP_CODE))
         phone = str(
@@ -91,12 +89,10 @@ async def run_setup(session: SetupSession) -> None:
             or ""
         )
         state = str(
-            setup_data.get(CONF_OTP_STATE)
-            or session.context.setup_data.get(CONF_OTP_STATE)
-            or ""
+            setup_data.get(CONF_OTP_STATE) or session.context.setup_data.get(CONF_OTP_STATE) or ""
         )
 
-        api = FabelApi(session.mass.http_session, access_token="pending")
+        api = FabelApi(session.mass.http_session, access_token="pending")  # noqa: S106
         try:
             tokens = await api.complete_sms_otp(phone, raw_code, state)
             setup_data[CONF_ACCESS_TOKEN] = tokens["access_token"]
@@ -155,7 +151,8 @@ async def run_setup(session: SetupSession) -> None:
             setup_data.pop(CONF_OTP_CODE, None)
             setup_data.pop(CONF_OTP_STATE, None)
             await session.finish(setup_data)
-            return
         except SetupFlowError as err:
             errors = {"base": err.translation_key or str(err)}
             profile_entry = replace(profile_entry, value=setup_data.get(CONF_PROFILE_ID))
+        else:
+            return

@@ -1,6 +1,6 @@
 [project]
 name = "fabel"
-version = "0.1.0"
+version = "0.1.2"
 description = "Unofficial Fabel audiobook provider for Music Assistant"
 license = "Apache-2.0"
 requires-python = ">=3.14"
@@ -125,6 +125,8 @@ convention = "pep257"
 [tool.ruff.lint.per-file-ignores]
 # command line scripts
 "scripts/**" = ["INP001", "T201"]
+# unit tests do not need public docstrings
+"tests/**" = ["D103"]
 
 [tool.ruff.lint.flake8-pytest-style]
 fixture-parentheses = false

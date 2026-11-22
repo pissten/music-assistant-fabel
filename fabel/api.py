@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import secrets
 import string
-from collections.abc import Callable, Awaitable
+from collections.abc import Awaitable, Callable
 from typing import Any
 from urllib.parse import unquote
 
@@ -49,6 +49,7 @@ class FabelApi:
         profile_id: str | None = None,
         on_tokens_updated: Callable[[], Awaitable[None] | None] | None = None,
     ) -> None:
+        """Create an API client with optional token-refresh callback."""
         self._session = session
         self._access_token = access_token.strip()
         self._refresh_token = (refresh_token or "").strip() or None
@@ -148,7 +149,7 @@ class FabelApi:
                 if resp.status == 204:
                     return {}
                 return await resp.json(content_type=None)
-        except (LoginFailed, MediaNotFoundError, ProviderUnavailableError):
+        except LoginFailed, MediaNotFoundError, ProviderUnavailableError:
             raise
         except (ClientError, TimeoutError) as err:
             raise ProviderUnavailableError(f"Fabel request failed: {err}") from err
@@ -400,7 +401,9 @@ class FabelApi:
         """Range-probe the CDN URL with stream auth headers."""
         req_headers = {**headers, "Range": "bytes=0-1"}
         try:
-            async with self._session.get(cdn_url, headers=req_headers, allow_redirects=True) as resp:
+            async with self._session.get(
+                cdn_url, headers=req_headers, allow_redirects=True
+            ) as resp:
                 return {k.lower(): v for k, v in resp.headers.items()}
         except ClientError as err:
             LOGGER.debug("CDN probe failed: %s", err)

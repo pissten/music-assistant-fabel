@@ -12,7 +12,6 @@ from __future__ import annotations
 from collections.abc import AsyncGenerator, Sequence
 from typing import TYPE_CHECKING, Any
 
-from music_assistant_models.config_entries import ConfigEntry
 from music_assistant_models.enums import (
     ContentType,
     ImageType,
@@ -50,7 +49,7 @@ from .constants import (
 )
 
 if TYPE_CHECKING:
-    from music_assistant_models.config_entries import ProviderConfig
+    from music_assistant_models.config_entries import ConfigEntry, ProviderConfig
     from music_assistant_models.provider import ProviderManifest
 
     from music_assistant.mass import MusicAssistant
@@ -126,9 +125,7 @@ class FabelProvider(MusicProvider):
         if not self._api:
             return
         try:
-            self._update_config_value(
-                CONF_ACCESS_TOKEN, self._api.access_token, immediate=True
-            )
+            self._update_config_value(CONF_ACCESS_TOKEN, self._api.access_token, immediate=True)
             if self._api.refresh_token:
                 self._update_config_value(
                     CONF_REFRESH_TOKEN, self._api.refresh_token, immediate=True
@@ -215,7 +212,7 @@ class FabelProvider(MusicProvider):
             folders: list[BrowseFolder] = []
             # Standard library audiobooks folder from the base implementation
             folders.extend(await super().browse(path))
-            root = path if path.endswith("://") or path.endswith("/") else f"{path.rstrip('/')}/"
+            root = path if path.endswith(("://", "/")) else f"{path.rstrip('/')}/"
             if "://" not in root:
                 root = f"{self.instance_id}://"
             for key, name in (
@@ -290,15 +287,11 @@ class FabelProvider(MusicProvider):
             duration=duration or None,
         )
 
-    def _parse_audiobook(self, raw: dict[str, Any]) -> Audiobook | None:
+    def _parse_audiobook(self, raw: dict[str, Any]) -> Audiobook | None:  # noqa: C901
         """Best-effort map of Eventyr book DTO → MA Audiobook."""
         # Prefer ISBN: streamV2 and CDN are keyed by isbn.
         book_id = str(
-            raw.get("isbn")
-            or raw.get("id")
-            or raw.get("bookId")
-            or raw.get("uuid")
-            or ""
+            raw.get("isbn") or raw.get("id") or raw.get("bookId") or raw.get("uuid") or ""
         )
         title = str(raw.get("title") or raw.get("name") or "").strip()
         if not book_id or not title:
@@ -309,13 +302,11 @@ class FabelProvider(MusicProvider):
 
         authors = _as_name_list(raw.get("authors") or raw.get("author"))
         narrators = _as_name_list(raw.get("narrators") or raw.get("narrator"))
-        duration = _as_int(raw.get("duration") or raw.get("durationSeconds") or raw.get("length")) or 0
+        duration = (
+            _as_int(raw.get("duration") or raw.get("durationSeconds") or raw.get("length")) or 0
+        )
         image_url = (
-            raw.get("cover")
-            or raw.get("coverUrl")
-            or raw.get("image")
-            or raw.get("imageUrl")
-            or ""
+            raw.get("cover") or raw.get("coverUrl") or raw.get("image") or raw.get("imageUrl") or ""
         )
         if isinstance(image_url, dict):
             image_url = image_url.get("url") or image_url.get("href") or ""
@@ -376,13 +367,7 @@ class FabelProvider(MusicProvider):
 
 
 def _safe_user_label(me: dict[str, Any]) -> str:
-    return str(
-        me.get("given_name")
-        or me.get("name")
-        or me.get("sub")
-        or me.get("id")
-        or "user"
-    )
+    return str(me.get("given_name") or me.get("name") or me.get("sub") or me.get("id") or "user")
 
 
 def _iter_book_dicts(payload: Any) -> list[dict[str, Any]]:
@@ -425,7 +410,7 @@ def _as_int(value: Any) -> int | None:
         if value is None or value == "":
             return None
         return int(float(value))
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return None
 
 
@@ -434,5 +419,5 @@ def _as_float(value: Any) -> float | None:
         if value is None or value == "":
             return None
         return float(value)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return None
