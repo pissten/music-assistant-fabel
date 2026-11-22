@@ -1,0 +1,24 @@
+{
+  "manifest": {
+    "name": "Fabel",
+    "description": "Stream audiobooks from a Norwegian Fabel subscription (unofficial community provider)."
+  },
+  "setup_flow": {
+    "phone": {
+      "title": "Fabel login",
+      "description": "Sign in with the same Norwegian mobile number as in the Fabel app. You will receive a one-time SMS code."
+    },
+    "otp": {
+      "title": "SMS code",
+      "description": "Enter the code you received by SMS."
+    },
+    "profile": {
+      "title": "Listening profile",
+      "description": "Choose which Fabel profile to use (sent as x-profile-id)."
+    }
+  },
+  "errors": {
+    "oppgi_mobilnummer": "Enter a mobile number.",
+    "ingen_profiler": "No listening profiles on this account."
+  }
+}

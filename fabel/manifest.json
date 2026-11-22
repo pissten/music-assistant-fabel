@@ -1,0 +1,12 @@
+{
+  "type": "music",
+  "domain": "fabel",
+  "stage": "alpha",
+  "name": "Fabel",
+  "description": "Stream audiobooks from a Norwegian Fabel subscription (unofficial community provider).",
+  "codeowners": ["@pissten"],
+  "provides": ["audiobook"],
+  "requirements": [],
+  "documentation": "https://github.com/pissten/music-assistant-fabel#readme",
+  "multi_instance": true
+}
