@@ -9,16 +9,22 @@ from music_assistant_models.config_entries import ConfigEntry, ConfigValueOption
 from music_assistant_models.enums import ConfigEntryType
 from music_assistant_models.errors import LoginFailed
 
+from music_assistant.helpers.throttle_retry import Throttler
 from music_assistant.models.setup_flow import SetupFlowError
 
 from .api import FabelApi
 from .constants import (
+    API_RATE_LIMIT,
+    API_RATE_PERIOD,
+    CONF_ACCEPT_TERMS,
     CONF_ACCESS_TOKEN,
     CONF_OTP_CODE,
     CONF_OTP_STATE,
     CONF_PHONE_NUMBER,
     CONF_PROFILE_ID,
     CONF_REFRESH_TOKEN,
+    FABEL_PRIVACY_URL,
+    FABEL_TERMS_URL,
 )
 
 if TYPE_CHECKING:
@@ -33,6 +39,19 @@ _PHONE_ENTRY = ConfigEntry(
     description="Norsk mobilnummer brukt i Fabel-appen (8 siffer eller +47…).",
 )
 
+_ACCEPT_TERMS_ENTRY = ConfigEntry(
+    key=CONF_ACCEPT_TERMS,
+    type=ConfigEntryType.BOOLEAN,
+    required=True,
+    default_value=False,
+    label="Jeg godtar Fabels vilkår og personvern",
+    description=(
+        f"Les [vilkår]({FABEL_TERMS_URL}) og [personvern]({FABEL_PRIVACY_URL}) "
+        "før du fortsetter. Vi sender bare SMS-kode til et eksisterende abonnement — "
+        "det opprettes ikke ny Fabel-konto her."
+    ),
+)
+
 _OTP_ENTRY = ConfigEntry(
     key=CONF_OTP_CODE,
     type=ConfigEntryType.STRING,
@@ -42,34 +61,54 @@ _OTP_ENTRY = ConfigEntry(
 )
 
 
-async def run_setup(session: SetupSession) -> None:  # noqa: C901, PLR0915
-    """Phone → SMS OTP → Eventyr tokens → pick profile."""
+def _otp_client(session: SetupSession) -> FabelApi:
+    return FabelApi(
+        session.mass.http_session,
+        access_token="pending",  # noqa: S106
+        throttler=Throttler(rate_limit=API_RATE_LIMIT, period=API_RATE_PERIOD),
+    )
+
+
+async def run_setup(session: SetupSession) -> None:  # noqa: C901, PLR0912, PLR0915
+    """Phone + terms → SMS OTP → Eventyr tokens → pick profile."""
     errors: dict[str, str] | None = None
     setup_data = dict(session.context.setup_data)
 
-    # --- Step 1: phone number ---
+    # --- Step 1: phone number + explicit terms acceptance ---
     while True:
         phone_entry = replace(
             _PHONE_ENTRY, value=setup_data.get(CONF_PHONE_NUMBER, _PHONE_ENTRY.value)
         )
+        terms_entry = replace(
+            _ACCEPT_TERMS_ENTRY,
+            value=bool(setup_data.get(CONF_ACCEPT_TERMS, False)),
+        )
         submitted = await session.form(
-            [phone_entry], step_id="phone", errors=errors, last_step=False
+            [phone_entry, terms_entry],
+            step_id="phone",
+            errors=errors,
+            last_step=False,
         )
         setup_data.update(submitted)
         phone = str(setup_data.get(CONF_PHONE_NUMBER) or "").strip()
+        accepted = bool(setup_data.get(CONF_ACCEPT_TERMS))
         if not phone:
             errors = {"base": "oppgi_mobilnummer"}
             continue
+        if not accepted:
+            errors = {"base": "godta_vilkar"}
+            continue
 
-        api = FabelApi(session.mass.http_session, access_token="pending")  # noqa: S106
+        api = _otp_client(session)
         try:
-            state = await api.request_sms_otp(phone)
+            state = await api.request_sms_otp(phone, accept_terms=True)
             setup_data[CONF_PHONE_NUMBER] = api.normalize_phone(phone)
             setup_data[CONF_OTP_STATE] = state
             setup_data.pop(CONF_OTP_CODE, None)
             # Keep state on the session context so retries/UI remounts still have it
             session.context.setup_data[CONF_PHONE_NUMBER] = setup_data[CONF_PHONE_NUMBER]
             session.context.setup_data[CONF_OTP_STATE] = state
+            session.context.setup_data[CONF_ACCEPT_TERMS] = True
             errors = None
             break
         except LoginFailed as err:
@@ -93,7 +132,7 @@ async def run_setup(session: SetupSession) -> None:  # noqa: C901, PLR0915
             setup_data.get(CONF_OTP_STATE) or session.context.setup_data.get(CONF_OTP_STATE) or ""
         )
 
-        api = FabelApi(session.mass.http_session, access_token="pending")  # noqa: S106
+        api = _otp_client(session)
         try:
             tokens = await api.complete_sms_otp(phone, raw_code, state)
             setup_data[CONF_ACCESS_TOKEN] = tokens["access_token"]
@@ -148,9 +187,10 @@ async def run_setup(session: SetupSession) -> None:  # noqa: C901, PLR0915
                 [profile_entry], step_id="profile", errors=errors, last_step=True
             )
             setup_data.update(profile_values)
-            # Drop ephemeral OTP fields from persisted setup
+            # Drop ephemeral OTP / terms fields from persisted setup
             setup_data.pop(CONF_OTP_CODE, None)
             setup_data.pop(CONF_OTP_STATE, None)
+            setup_data.pop(CONF_ACCEPT_TERMS, None)
             await session.finish(setup_data)
         except SetupFlowError as err:
             errors = {"base": err.translation_key or str(err)}

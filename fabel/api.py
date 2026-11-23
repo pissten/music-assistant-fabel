@@ -5,15 +5,21 @@ from __future__ import annotations
 import logging
 import secrets
 import string
+import time
 from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import unquote
 
 from aiohttp import ClientError, ClientResponse, ClientSession
 from music_assistant_models.errors import LoginFailed, MediaNotFoundError, ProviderUnavailableError
 
+from music_assistant.helpers.throttle_retry import Throttler
+
 from .constants import (
     API_BASE,
+    API_RATE_LIMIT,
+    API_RATE_PERIOD,
     CDN_USER_AGENT,
     EP_ALLOWANCE,
     EP_AUTH_COMPLETE_SIGNIN,
@@ -26,10 +32,12 @@ from .constants import (
     EP_BOOKSHELVES,
     EP_COMPLETED,
     EP_FAVORITES,
+    EP_LISTENING_SESSIONS_BATCH,
     EP_ME,
     EP_PROFILES,
     EP_PROGRESS,
     HEADER_PROFILE_ID,
+    LIBRARY_CACHE_TTL_SECONDS,
     SMS_APP_HASH,
     USER_AGENT,
 )
@@ -40,7 +48,7 @@ LOGGER = logging.getLogger("music_assistant.fabel.api")
 class FabelApi:
     """Thin Eventyr API wrapper used by the provider."""
 
-    def __init__(
+    def __init__(  # noqa: PLR0913
         self,
         session: ClientSession,
         *,
@@ -48,6 +56,7 @@ class FabelApi:
         refresh_token: str | None = None,
         profile_id: str | None = None,
         on_tokens_updated: Callable[[], Awaitable[None] | None] | None = None,
+        throttler: Throttler | None = None,
     ) -> None:
         """Create an API client with optional token-refresh callback."""
         self._session = session
@@ -55,6 +64,8 @@ class FabelApi:
         self._refresh_token = (refresh_token or "").strip() or None
         self._profile_id = (profile_id or "").strip() or None
         self._on_tokens_updated = on_tokens_updated
+        self._throttler = throttler or Throttler(rate_limit=API_RATE_LIMIT, period=API_RATE_PERIOD)
+        self._list_cache: dict[str, tuple[float, Any]] = {}
 
     @property
     def access_token(self) -> str:
@@ -70,6 +81,10 @@ class FabelApi:
     def profile_id(self) -> str | None:
         """Active listening profile id (`x-profile-id`)."""
         return self._profile_id
+
+    def invalidate_library_cache(self) -> None:
+        """Drop cached in-progress / favorites / completed payloads."""
+        self._list_cache.clear()
 
     @staticmethod
     def normalize_phone(phone: str) -> str:
@@ -117,30 +132,36 @@ class FabelApi:
         method: str,
         path: str,
         *,
-        json_data: dict[str, Any] | None = None,
+        json_data: Any | None = None,
         params: dict[str, str] | None = None,
         require_profile: bool = False,
     ) -> Any:
         """Perform an authenticated JSON request against the Eventyr API."""
         url = path if path.startswith("http") else f"{API_BASE}{path}"
         try:
-            async with self._session.request(
-                method,
-                url,
-                headers=self._headers(require_profile=require_profile),
-                json=json_data,
-                params=params,
-            ) as resp:
+            async with (
+                self._throttler,
+                self._session.request(
+                    method,
+                    url,
+                    headers=self._headers(require_profile=require_profile),
+                    json=json_data,
+                    params=params,
+                ) as resp,
+            ):
                 if resp.status == 401 and self._refresh_token:
                     await resp.release()
                     await self.refresh_access_token()
-                    async with self._session.request(
-                        method,
-                        url,
-                        headers=self._headers(require_profile=require_profile),
-                        json=json_data,
-                        params=params,
-                    ) as retry:
+                    async with (
+                        self._throttler,
+                        self._session.request(
+                            method,
+                            url,
+                            headers=self._headers(require_profile=require_profile),
+                            json=json_data,
+                            params=params,
+                        ) as retry,
+                    ):
                         await self._raise_for_status(retry)
                         if retry.status == 204:
                             return {}
@@ -158,15 +179,18 @@ class FabelApi:
         """Refresh via Eventyr `POST /api/auth/token` (app refreshToken)."""
         if not self._refresh_token:
             raise LoginFailed("No Fabel refresh token configured")
-        async with self._session.post(
-            f"{API_BASE}{EP_AUTH_TOKEN}",
-            json={"refreshToken": self._refresh_token},
-            headers={
-                "User-Agent": USER_AGENT,
-                "Accept": "application/json",
-                "Content-Type": "application/json",
-            },
-        ) as resp:
+        async with (
+            self._throttler,
+            self._session.post(
+                f"{API_BASE}{EP_AUTH_TOKEN}",
+                json={"refreshToken": self._refresh_token},
+                headers={
+                    "User-Agent": USER_AGENT,
+                    "Accept": "application/json",
+                    "Content-Type": "application/json",
+                },
+            ) as resp,
+        ):
             body = await resp.json(content_type=None)
             if resp.status >= 400:
                 raise LoginFailed(f"Token refresh failed ({resp.status}): {body}")
@@ -197,10 +221,13 @@ class FabelApi:
             return digits
         return "".join(c for c in str(code) if c.isdigit())
 
-    async def request_sms_otp(self, phone_number: str) -> str:
+    async def request_sms_otp(self, phone_number: str, *, accept_terms: bool) -> str:
         """Send SMS OTP via Eventyr `POST /api/auth/initiate-signin`. Returns state."""
+        if not accept_terms:
+            raise LoginFailed("Du må godta Fabels vilkår og personvern før innlogging")
         phone = self.normalize_phone(phone_number)
         state = self._otp_nonce()
+        # Existing-account login: terms + privacy only (no signupTerms — avoids creating accounts).
         payload = {
             "phoneNumber": phone,
             "appHash": SMS_APP_HASH,
@@ -208,20 +235,22 @@ class FabelApi:
             "legalConsents": {
                 "termsAndConditions": 1,
                 "privacyPolicy": 1,
-                "signupTerms": 1,
             },
             "state": state,
         }
         try:
-            async with self._session.post(
-                f"{API_BASE}{EP_AUTH_INITIATE_SIGNIN}",
-                json=payload,
-                headers={
-                    "User-Agent": CDN_USER_AGENT,
-                    "Accept": "application/json",
-                    "Content-Type": "application/json",
-                },
-            ) as resp:
+            async with (
+                self._throttler,
+                self._session.post(
+                    f"{API_BASE}{EP_AUTH_INITIATE_SIGNIN}",
+                    json=payload,
+                    headers={
+                        "User-Agent": CDN_USER_AGENT,
+                        "Accept": "application/json",
+                        "Content-Type": "application/json",
+                    },
+                ) as resp,
+            ):
                 if resp.status >= 400:
                     body = await resp.text()
                     raise LoginFailed(f"Kunne ikke sende SMS ({resp.status}): {body[:200]}")
@@ -252,15 +281,18 @@ class FabelApi:
             len(state),
         )
         try:
-            async with self._session.post(
-                f"{API_BASE}{EP_AUTH_COMPLETE_SIGNIN}",
-                json=payload,
-                headers={
-                    "User-Agent": CDN_USER_AGENT,
-                    "Accept": "application/json",
-                    "Content-Type": "application/json",
-                },
-            ) as resp:
+            async with (
+                self._throttler,
+                self._session.post(
+                    f"{API_BASE}{EP_AUTH_COMPLETE_SIGNIN}",
+                    json=payload,
+                    headers={
+                        "User-Agent": CDN_USER_AGENT,
+                        "Accept": "application/json",
+                        "Content-Type": "application/json",
+                    },
+                ) as resp,
+            ):
                 body = await resp.json(content_type=None)
                 if resp.status >= 400:
                     detail = body.get("detail") if isinstance(body, dict) else body
@@ -333,16 +365,31 @@ class FabelApi:
         LOGGER.info("Fabel using profile %s (%s)", pid, chosen.get("name"))
         return pid
 
-    async def get_books_in_progress(self) -> Any:
+    async def _cached_list(self, key: str, path: str) -> Any:
+        now = time.monotonic()
+        cached = self._list_cache.get(key)
+        if cached and (now - cached[0]) < LIBRARY_CACHE_TTL_SECONDS:
+            return cached[1]
+        payload = await self.request_json("GET", path, require_profile=True)
+        self._list_cache[key] = (now, payload)
+        return payload
+
+    async def get_books_in_progress(self, *, use_cache: bool = True) -> Any:
         """Return books currently in progress for the profile."""
+        if use_cache:
+            return await self._cached_list("in_progress", EP_BOOKS_IN_PROGRESS)
         return await self.request_json("GET", EP_BOOKS_IN_PROGRESS, require_profile=True)
 
-    async def get_favorites(self) -> Any:
+    async def get_favorites(self, *, use_cache: bool = True) -> Any:
         """Return favorite books."""
+        if use_cache:
+            return await self._cached_list("favorites", EP_FAVORITES)
         return await self.request_json("GET", EP_FAVORITES, require_profile=True)
 
-    async def get_completed(self) -> Any:
+    async def get_completed(self, *, use_cache: bool = True) -> Any:
         """Return completed books."""
+        if use_cache:
+            return await self._cached_list("completed", EP_COMPLETED)
         return await self.request_json("GET", EP_COMPLETED, require_profile=True)
 
     async def get_progress(self) -> Any:
@@ -384,6 +431,51 @@ class FabelApi:
         )
         return payload if isinstance(payload, dict) else {}
 
+    async def report_listening_session(  # noqa: PLR0913
+        self,
+        *,
+        isbn: str,
+        start_position: int,
+        end_position: int,
+        started_at: datetime,
+        ended_at: datetime,
+        book_duration: int,
+    ) -> None:
+        """
+        Report a listening interval so Fabel can count subscription hours.
+
+        Uses ``POST /listening-sessions/batch`` (verified to increase allowance.spentTime).
+        Positions and bookDuration are in whole seconds.
+        """
+        if not self._profile_id:
+            raise LoginFailed("Fabel profile id is required to report listening")
+        if end_position <= start_position or book_duration <= 0:
+            return
+        session = {
+            "isbn": isbn,
+            "profile": self._profile_id,
+            "startPosition": int(start_position),
+            "endPosition": int(end_position),
+            "startedAt": _iso_z(started_at),
+            "endedAt": _iso_z(ended_at),
+            "bookDuration": int(book_duration),
+        }
+        await self.request_json(
+            "POST",
+            EP_LISTENING_SESSIONS_BATCH,
+            json_data=[session],
+            require_profile=True,
+        )
+        # Progress / library lists may change after reporting
+        self.invalidate_library_cache()
+        LOGGER.debug(
+            "Fabel listening session reported isbn=%s %s→%s (%ss)",
+            isbn,
+            start_position,
+            end_position,
+            max(0, end_position - start_position),
+        )
+
     @staticmethod
     def parse_stream_response(stream: dict[str, Any]) -> tuple[str, dict[str, str], int]:
         """Parse streamV2 JSON into CDN URL, request headers, and duration."""
@@ -412,3 +504,30 @@ class FabelApi:
         except ClientError as err:
             LOGGER.debug("CDN probe failed: %s", err)
             return {}
+
+
+def _iso_z(value: datetime) -> str:
+    """Format datetime as UTC ISO-8601 with millisecond precision and Z suffix."""
+    value = value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+    return value.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+
+
+def concurrent_streams_from_me(me: dict[str, Any]) -> int:
+    """
+    Map Fabel subscription plan to max concurrent streams.
+
+    Lett/Standard = 1, Duo = 2, Familie = 3. Falls back to maxGuests+1 or 1.
+    """
+    sub = me.get("subscription") if isinstance(me.get("subscription"), dict) else {}
+    plan_name = str(sub.get("planName") or "").lower()
+    if "familie" in plan_name or "family" in plan_name:
+        return 3
+    if "duo" in plan_name:
+        return 2
+    try:
+        max_guests = int(sub.get("maxGuests") or 0)
+    except TypeError, ValueError:
+        max_guests = 0
+    if max_guests > 0:
+        return max(1, max_guests + 1)
+    return 1

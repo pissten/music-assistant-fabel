@@ -6,7 +6,7 @@
   "setup_flow": {
     "phone": {
       "title": "Fabel login",
-      "description": "Sign in with the same Norwegian mobile number as in the Fabel app. You will receive a one-time SMS code."
+      "description": "Sign in with the same Norwegian mobile number as in the Fabel app. You must accept Fabel's terms before we request an SMS code. Only existing accounts are supported."
     },
     "otp": {
       "title": "SMS code",
@@ -19,6 +19,7 @@
   },
   "errors": {
     "oppgi_mobilnummer": "Enter a mobile number.",
+    "godta_vilkar": "Accept Fabel's terms and privacy policy to continue.",
     "ingen_profiler": "No listening profiles on this account."
   }
 }

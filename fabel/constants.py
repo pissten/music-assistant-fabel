@@ -22,6 +22,7 @@ CONF_PROFILE_ID = "profile_id"
 CONF_PHONE_NUMBER = "phone_number"
 CONF_OTP_CODE = "otp_code"
 CONF_OTP_STATE = "otp_state"
+CONF_ACCEPT_TERMS = "accept_terms"
 
 HEADER_PROFILE_ID = "x-profile-id"
 
@@ -38,12 +39,24 @@ EP_BOOKSHELVES = "/bookshelves"
 EP_BOOK = "/book/{isbn}"
 EP_BOOK_CAN_LISTEN = "/book/{isbn}/can-listen"
 EP_BOOK_STREAM_V2 = "/book/{isbn}/streamV2"
+EP_LISTENING_SESSIONS_BATCH = "/listening-sessions/batch"
 # App token refresh (NOT OIDC token endpoint) — POST JSON {refreshToken}
 EP_AUTH_TOKEN = "/auth/token"  # noqa: S105
 # Native app SMS OTP (returns Eventyr JWTs — not Min Konto/Fuse short tokens)
 EP_AUTH_INITIATE_SIGNIN = "/auth/initiate-signin"
 EP_AUTH_COMPLETE_SIGNIN = "/auth/complete-signin"
 
-USER_AGENT = "MusicAssistant-Fabel/0.1.5 (compatible; Fabel/2.1.6)"
+# Public legal documents the user must accept before we send legalConsents
+FABEL_TERMS_URL = "https://fabel.no/vilkar"
+FABEL_PRIVACY_URL = "https://fabel.no/personvern"
+
+# Soft cache for library list endpoints used by search / browse / sync
+LIBRARY_CACHE_TTL_SECONDS = 10 * 60
+
+# Conservative Eventyr rate limit
+API_RATE_LIMIT = 3
+API_RATE_PERIOD = 1.0
+
+USER_AGENT = "MusicAssistant-Fabel/0.1.6 (compatible; Fabel/2.1.6)"
 # Match official app for CDN / auth
 CDN_USER_AGENT = "okhttp/4.12.0"

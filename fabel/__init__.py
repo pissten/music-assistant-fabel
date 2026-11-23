@@ -10,9 +10,13 @@ Streams via ``/api/book/{isbn}/streamV2`` → progressive ``.webm`` (Opus) on
 from __future__ import annotations
 
 from collections.abc import AsyncGenerator, Sequence
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, cast
 
+from music_assistant_models.config_entries import ConfigEntry
 from music_assistant_models.enums import (
+    ConfigEntryType,
     ContentType,
     ImageType,
     MediaType,
@@ -38,10 +42,13 @@ from music_assistant_models.media_items import (
 )
 from music_assistant_models.streamdetails import StreamDetails
 
+from music_assistant.helpers.throttle_retry import Throttler
 from music_assistant.models.music_provider import MusicProvider
 
-from .api import FabelApi
+from .api import FabelApi, concurrent_streams_from_me
 from .constants import (
+    API_RATE_LIMIT,
+    API_RATE_PERIOD,
     CONF_ACCESS_TOKEN,
     CONF_PROFILE_ID,
     CONF_REFRESH_TOKEN,
@@ -49,7 +56,7 @@ from .constants import (
 )
 
 if TYPE_CHECKING:
-    from music_assistant_models.config_entries import ConfigEntry, ProviderConfig
+    from music_assistant_models.config_entries import ProviderConfig
     from music_assistant_models.provider import ProviderManifest
 
     from music_assistant.mass import MusicAssistant
@@ -60,6 +67,16 @@ SUPPORTED_FEATURES = {
     ProviderFeature.SEARCH,
     ProviderFeature.LIBRARY_AUDIOBOOKS,
 }
+
+
+@dataclass
+class _ListenReportState:
+    """Open listening interval waiting to be flushed to Eventyr."""
+
+    start_position: int
+    started_at: datetime
+    book_duration: int
+    last_position: int
 
 
 async def setup(
@@ -73,15 +90,60 @@ class FabelProvider(MusicProvider):
     """Music source for Fabel audiobooks."""
 
     _api: FabelApi
+    _max_concurrent_streams: int = 1
+    _listen_state: dict[str, _ListenReportState]
 
     @property
     def is_streaming_provider(self) -> bool:
         """Fabel is a streaming catalogue / subscription library."""
         return True
 
+    @property
+    def max_concurrent_streams(self) -> int:
+        """Honour Fabel plan limits (Lett/Standard=1, Duo=2, Familie=3)."""
+        return self._max_concurrent_streams
+
     async def get_config_entries(self) -> tuple[ConfigEntry, ...]:
-        """No runtime options yet — credentials live in setup_data."""
-        return ()
+        """Show Fabel listening allowance (spent / remaining hours) on the settings page."""
+        return (
+            ConfigEntry(
+                key="fabel_allowance",
+                type=ConfigEntryType.LABEL,
+                label=await self._allowance_label(),
+                category="generic",
+            ),
+        )
+
+    async def _allowance_label(self) -> str:
+        """Build a human-readable allowance line from Eventyr `/me/allowance` (+ plan)."""
+        try:
+            me = await self._api.get_me()
+            allowance_payload = await self._api.get_allowance()
+        except Exception as err:  # noqa: BLE001
+            self.logger.debug("Fabel allowance fetch failed: %s", err)
+            return "Lyttetid: kunne ikke hentes akkurat nå (prøv å åpne siden på nytt)."
+
+        sub = me.get("subscription") if isinstance(me.get("subscription"), dict) else {}
+        plan_name = str(sub.get("planName") or "").strip() or "ukjent plan"
+        streams = concurrent_streams_from_me(me)
+
+        block = allowance_payload if isinstance(allowance_payload, dict) else {}
+        allowance = block.get("allowance") if isinstance(block.get("allowance"), dict) else block
+        if not isinstance(allowance, dict):
+            allowance = sub.get("allowance") if isinstance(sub.get("allowance"), dict) else {}
+
+        spent_ms = _as_int(allowance.get("spentTime")) or 0
+        available_ms = _as_int(allowance.get("availableTime"))
+        if available_ms is None:
+            actual = _as_int(allowance.get("actualAllowance")) or 0
+            available_ms = max(0, actual - spent_ms)
+
+        spent_txt = _format_ms_duration(spent_ms)
+        left_txt = _format_ms_duration(available_ms)
+        return (
+            f"Lyttetid denne perioden: {spent_txt} brukt · {left_txt} igjen "
+            f"({plan_name}, maks {streams} samtidige strømmer)."
+        )
 
     async def handle_async_init(self) -> None:
         """Validate tokens and resolve listening profile."""
@@ -90,12 +152,14 @@ class FabelProvider(MusicProvider):
         profile = str(self.get_setup_value(CONF_PROFILE_ID) or "")
         if not access and not refresh:
             raise SetupFailedError("Fabel access token or refresh token is required")
+        self._listen_state = {}
         self._api = FabelApi(
             self.mass.http_session,
             access_token=access or "pending",
             refresh_token=refresh or None,
             profile_id=profile or None,
             on_tokens_updated=self._persist_tokens,
+            throttler=Throttler(rate_limit=API_RATE_LIMIT, period=API_RATE_PERIOD),
         )
         if not access and refresh:
             await self._api.refresh_access_token()
@@ -114,10 +178,12 @@ class FabelProvider(MusicProvider):
                     raise SetupFailedError(str(refresh_err)) from refresh_err
             else:
                 raise SetupFailedError(str(err)) from err
+        self._max_concurrent_streams = concurrent_streams_from_me(me)
         self.logger.info(
-            "Fabel login OK for %s (profile=%s)",
+            "Fabel login OK for %s (profile=%s streams=%s)",
             _safe_user_label(me),
             self._api.profile_id,
+            self._max_concurrent_streams,
         )
 
     def _persist_tokens(self) -> None:
@@ -136,7 +202,7 @@ class FabelProvider(MusicProvider):
     async def search(
         self, search_query: str, media_types: list[MediaType], limit: int = 5
     ) -> SearchResults:
-        """Search in-progress / favorites locally until catalogue search is mapped."""
+        """Search cached in-progress / favorites until catalogue search is mapped."""
         result = SearchResults()
         if MediaType.AUDIOBOOK not in media_types:
             return result
@@ -144,7 +210,7 @@ class FabelProvider(MusicProvider):
         books: list[Audiobook] = []
         for loader in (self._api.get_books_in_progress, self._api.get_favorites):
             try:
-                payload = await loader()
+                payload = await loader(use_cache=True)
             except Exception as err:  # noqa: BLE001
                 self.logger.debug("Fabel search source failed: %s", err)
                 continue
@@ -168,7 +234,9 @@ class FabelProvider(MusicProvider):
             self._api.get_completed,
         ):
             try:
-                payload = await loader()
+                payload = await loader(use_cache=True)
+            except LoginFailed:
+                raise
             except Exception as err:  # noqa: BLE001
                 self.logger.warning("Fabel library fetch failed: %s", err)
                 continue
@@ -183,16 +251,15 @@ class FabelProvider(MusicProvider):
         """Return one audiobook by ISBN via /api/book/{isbn}."""
         try:
             raw = await self._api.get_book(prov_audiobook_id)
-            book = self._parse_audiobook(raw if isinstance(raw, dict) else {})
-            if book:
-                return book
         except MediaNotFoundError:
             raise
-        except Exception as err:  # noqa: BLE001
-            self.logger.debug("Fabel get_book failed, scanning library: %s", err)
-        async for book in self.get_library_audiobooks():
-            if book.item_id == prov_audiobook_id:
-                return book
+        except LoginFailed:
+            raise
+        except Exception as err:
+            raise MediaNotFoundError(f"Fabel book not found: {prov_audiobook_id}") from err
+        book = self._parse_audiobook(raw if isinstance(raw, dict) else {})
+        if book:
+            return book
         raise MediaNotFoundError(f"Fabel book not found: {prov_audiobook_id}")
 
     async def browse(self, path: str) -> Sequence[MediaItemType | BrowseFolder]:
@@ -237,7 +304,7 @@ class FabelProvider(MusicProvider):
                 "favorites": self._api.get_favorites,
                 "completed": self._api.get_completed,
             }[subpath]
-            payload = await loader()
+            payload = await loader(use_cache=True)
             books: list[Audiobook] = []
             for raw in _iter_book_dicts(payload):
                 book = self._parse_audiobook(raw)
@@ -291,6 +358,78 @@ class FabelProvider(MusicProvider):
             allow_seek=True,
             duration=duration or None,
         )
+
+    async def on_played(  # noqa: C901, PLR0913, PLR0917
+        self,
+        media_type: MediaType,
+        prov_item_id: str,
+        fully_played: bool,  # noqa: FBT001
+        position: int,
+        media_item: MediaItemType,
+        is_playing: bool = False,  # noqa: FBT001, FBT002
+    ) -> None:
+        """
+        Report listening progress so Fabel counts subscription hours.
+
+        Music Assistant calls this about every 30s while playing, and on pause/stop.
+        We POST intervals to ``/listening-sessions/batch``.
+        """
+        if media_type != MediaType.AUDIOBOOK:
+            return
+        if not isinstance(media_item, Audiobook):
+            return
+
+        book_duration = int(media_item.duration or 0)
+        if book_duration <= 0:
+            return
+
+        now = datetime.now(UTC)
+        position = max(0, int(position or 0))
+        if fully_played:
+            position = max(position, book_duration)
+
+        state = self._listen_state.get(prov_item_id)
+        if state is None:
+            # Start a new interval at the current position.
+            self._listen_state[prov_item_id] = _ListenReportState(
+                start_position=position,
+                started_at=now,
+                book_duration=book_duration,
+                last_position=position,
+            )
+            if is_playing and not fully_played:
+                return
+            # Immediate stop/finish with no prior open interval — nothing to report yet.
+            if position <= 0 and not fully_played:
+                self._listen_state.pop(prov_item_id, None)
+                return
+
+        state = self._listen_state[prov_item_id]
+        state.book_duration = book_duration or state.book_duration
+        end_position = max(state.last_position, position)
+
+        # Flush when playback stops/pauses/finishes, or when we have a meaningful advance.
+        should_flush = (not is_playing) or fully_played or (end_position > state.start_position)
+        if should_flush and end_position > state.start_position:
+            try:
+                await self._api.report_listening_session(
+                    isbn=prov_item_id,
+                    start_position=state.start_position,
+                    end_position=end_position,
+                    started_at=state.started_at,
+                    ended_at=now,
+                    book_duration=state.book_duration,
+                )
+            except Exception as err:  # noqa: BLE001
+                self.logger.warning("Fabel listening-session report failed: %s", err)
+            else:
+                # Continue from the reported end while still playing.
+                state.start_position = end_position
+                state.started_at = now
+
+        state.last_position = end_position
+        if not is_playing or fully_played:
+            self._listen_state.pop(prov_item_id, None)
 
     def _parse_audiobook(self, raw: dict[str, Any]) -> Audiobook | None:  # noqa: C901
         """Best-effort map of Eventyr book DTO → MA Audiobook."""
@@ -417,6 +556,17 @@ def _as_int(value: Any) -> int | None:
         return int(float(value))
     except TypeError, ValueError:
         return None
+
+
+def _format_ms_duration(ms: int) -> str:
+    """Format Eventyr millisecond durations as 'X t Y min' (or just minutes)."""
+    total_minutes = max(0, int(ms) // 60_000)
+    hours, minutes = divmod(total_minutes, 60)
+    if hours and minutes:
+        return f"{hours} t {minutes} min"
+    if hours:
+        return f"{hours} t"
+    return f"{minutes} min"
 
 
 def _as_float(value: Any) -> float | None:

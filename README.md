@@ -6,22 +6,25 @@ Unofficial [Music Assistant](https://music-assistant.io) community provider for 
 
 ## Features
 
-- Login with mobile number + SMS (same flow as the Fabel app)
+- Login with mobile number + SMS (same flow as the Fabel app), with explicit terms acceptance
 - Automatic access-token refresh
-- Library browse (in progress, favorites, completed)
+- Reports listening sessions so Fabel subscription hours (“Dine timer”) are counted
+- Honours plan concurrent-stream limits (`max_concurrent_streams`)
+- Library browse (in progress, favorites, completed) with cached/throttled API calls
 - Progressive WebM/Opus streaming with seek
+- Shows spent / remaining listening time on the provider settings page
 
 ## Install (Marketplace)
 
 1. In Music Assistant, enable the **community catalog** (admin).
 2. Open **Marketplace** → find **Fabel** → install.
-3. Add the provider → enter mobile number → SMS code → pick listening profile.
+3. Add the provider → accept terms → enter mobile number → SMS code → pick listening profile.
 
 Until the provider is admitted to the catalog, you can load it as a local/dev provider from this repository (`fabel/` folder).
 
 ## Status
 
-`alpha` — works for subscribed audiobook playback; catalogue search and bidirectional progress sync are limited.
+`alpha` — subscribed audiobook playback with hour reporting; full catalogue search is still limited.
 
 ## Development
 
