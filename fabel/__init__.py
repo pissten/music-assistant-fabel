@@ -123,14 +123,19 @@ class FabelProvider(MusicProvider):
             self.logger.debug("Fabel allowance fetch failed: %s", err)
             return "Lyttetid: kunne ikke hentes akkurat nå (prøv å åpne siden på nytt)."
 
-        sub = me.get("subscription") if isinstance(me.get("subscription"), dict) else {}
+        raw_sub = me.get("subscription")
+        sub: dict[str, Any] = raw_sub if isinstance(raw_sub, dict) else {}
         plan_name = str(sub.get("planName") or "").strip() or "ukjent plan"
         streams = concurrent_streams_from_me(me)
 
-        block = allowance_payload if isinstance(allowance_payload, dict) else {}
-        allowance = block.get("allowance") if isinstance(block.get("allowance"), dict) else block
-        if not isinstance(allowance, dict):
-            allowance = sub.get("allowance") if isinstance(sub.get("allowance"), dict) else {}
+        block: dict[str, Any] = allowance_payload if isinstance(allowance_payload, dict) else {}
+        nested = block.get("allowance")
+        allowance: dict[str, Any]
+        if isinstance(nested, dict):
+            allowance = nested
+        else:
+            raw_allowance = sub.get("allowance")
+            allowance = raw_allowance if isinstance(raw_allowance, dict) else {}
 
         spent_ms = _as_int(allowance.get("spentTime")) or 0
         available_ms = _as_int(allowance.get("availableTime"))

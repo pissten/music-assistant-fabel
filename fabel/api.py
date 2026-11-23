@@ -518,7 +518,8 @@ def concurrent_streams_from_me(me: dict[str, Any]) -> int:
 
     Lett/Standard = 1, Duo = 2, Familie = 3. Falls back to maxGuests+1 or 1.
     """
-    sub = me.get("subscription") if isinstance(me.get("subscription"), dict) else {}
+    raw_sub = me.get("subscription")
+    sub: dict[str, Any] = raw_sub if isinstance(raw_sub, dict) else {}
     plan_name = str(sub.get("planName") or "").lower()
     if "familie" in plan_name or "family" in plan_name:
         return 3
