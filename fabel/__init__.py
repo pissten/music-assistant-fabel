@@ -147,7 +147,7 @@ class FabelProvider(MusicProvider):
         left_txt = _format_ms_duration(available_ms)
         return (
             f"Lyttetid denne perioden: {spent_txt} brukt · {left_txt} igjen "
-            f"({plan_name}, maks {streams} samtidige strømmer)."
+            f"({plan_name}, max {streams} concurrent streams)."
         )
 
     async def handle_async_init(self) -> None:

@@ -1,6 +1,6 @@
 [project]
 name = "fabel"
-version = "0.1.7"
+version = "0.1.8"
 description = "Unofficial Fabel audiobook provider for Music Assistant"
 license = "Apache-2.0"
 requires-python = ">=3.14"

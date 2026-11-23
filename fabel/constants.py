@@ -57,6 +57,6 @@ LIBRARY_CACHE_TTL_SECONDS = 10 * 60
 API_RATE_LIMIT = 3
 API_RATE_PERIOD = 1.0
 
-USER_AGENT = "MusicAssistant-Fabel/0.1.7 (compatible; Fabel/2.1.6)"
+USER_AGENT = "MusicAssistant-Fabel/0.1.8 (compatible; Fabel/2.1.6)"
 # Match official app for CDN / auth
 CDN_USER_AGENT = "okhttp/4.12.0"
