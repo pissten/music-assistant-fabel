@@ -6,7 +6,7 @@ import logging
 import secrets
 import string
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import unquote
@@ -41,6 +41,7 @@ from .constants import (
     SMS_APP_HASH,
     USER_AGENT,
 )
+from .listening import ListeningSession
 
 LOGGER = logging.getLogger("music_assistant.fabel.api")
 
@@ -431,6 +432,50 @@ class FabelApi:
         )
         return payload if isinstance(payload, dict) else {}
 
+    async def report_listening_sessions(self, sessions: Sequence[ListeningSession]) -> None:
+        """
+        Report one or more listening intervals in a single batch call.
+
+        Uses ``POST /listening-sessions/batch`` (verified to increase ``allowance.spentTime``
+        for every interval in the batch, including overlapping re-listens).
+        Positions and ``bookDuration`` are in whole seconds.
+        """
+        if not self._profile_id:
+            raise LoginFailed("Fabel profile id is required to report listening")
+        valid_sessions = [
+            item
+            for item in sessions
+            if item.end_position > item.start_position and item.book_duration > 0
+        ]
+        if not valid_sessions:
+            return
+        payload = [
+            {
+                "isbn": item.isbn,
+                "profile": self._profile_id,
+                "startPosition": int(item.start_position),
+                "endPosition": int(item.end_position),
+                "startedAt": _iso_z(item.started_at),
+                "endedAt": _iso_z(item.ended_at),
+                "bookDuration": int(item.book_duration),
+            }
+            for item in valid_sessions
+        ]
+        await self.request_json(
+            "POST",
+            EP_LISTENING_SESSIONS_BATCH,
+            json_data=payload,
+            require_profile=True,
+        )
+        # Progress / library lists may change after reporting
+        self.invalidate_library_cache()
+        total_seconds = sum(item.seconds for item in valid_sessions)
+        LOGGER.debug(
+            "Fabel listening batch reported: %s session(s), %ss total",
+            len(valid_sessions),
+            total_seconds,
+        )
+
     async def report_listening_session(  # noqa: PLR0913
         self,
         *,
@@ -441,39 +486,18 @@ class FabelApi:
         ended_at: datetime,
         book_duration: int,
     ) -> None:
-        """
-        Report a listening interval so Fabel can count subscription hours.
-
-        Uses ``POST /listening-sessions/batch`` (verified to increase allowance.spentTime).
-        Positions and bookDuration are in whole seconds.
-        """
-        if not self._profile_id:
-            raise LoginFailed("Fabel profile id is required to report listening")
-        if end_position <= start_position or book_duration <= 0:
-            return
-        session = {
-            "isbn": isbn,
-            "profile": self._profile_id,
-            "startPosition": int(start_position),
-            "endPosition": int(end_position),
-            "startedAt": _iso_z(started_at),
-            "endedAt": _iso_z(ended_at),
-            "bookDuration": int(book_duration),
-        }
-        await self.request_json(
-            "POST",
-            EP_LISTENING_SESSIONS_BATCH,
-            json_data=[session],
-            require_profile=True,
-        )
-        # Progress / library lists may change after reporting
-        self.invalidate_library_cache()
-        LOGGER.debug(
-            "Fabel listening session reported isbn=%s %s→%s (%ss)",
-            isbn,
-            start_position,
-            end_position,
-            max(0, end_position - start_position),
+        """Report a single listening interval via ``report_listening_sessions``."""
+        await self.report_listening_sessions(
+            [
+                ListeningSession(
+                    isbn=isbn,
+                    start_position=start_position,
+                    end_position=end_position,
+                    started_at=started_at,
+                    ended_at=ended_at,
+                    book_duration=book_duration,
+                )
+            ]
         )
 
     @staticmethod

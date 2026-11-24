@@ -10,8 +10,6 @@ Streams via ``/api/book/{isbn}/streamV2`` → progressive ``.webm`` (Opus) on
 from __future__ import annotations
 
 from collections.abc import AsyncGenerator, Sequence
-from dataclasses import dataclass
-from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, cast
 
 from music_assistant_models.config_entries import ConfigEntry
@@ -54,6 +52,7 @@ from .constants import (
     CONF_REFRESH_TOKEN,
     DOMAIN,
 )
+from .listening import ListeningTracker
 
 if TYPE_CHECKING:
     from music_assistant_models.config_entries import ProviderConfig
@@ -69,16 +68,6 @@ SUPPORTED_FEATURES = {
 }
 
 
-@dataclass
-class _ListenReportState:
-    """Open listening interval waiting to be flushed to Eventyr."""
-
-    start_position: int
-    started_at: datetime
-    book_duration: int
-    last_position: int
-
-
 async def setup(
     mass: MusicAssistant, manifest: ProviderManifest, config: ProviderConfig
 ) -> ProviderInstanceType:
@@ -91,7 +80,7 @@ class FabelProvider(MusicProvider):
 
     _api: FabelApi
     _max_concurrent_streams: int = 1
-    _listen_state: dict[str, _ListenReportState]
+    _tracker: ListeningTracker | None = None
 
     @property
     def is_streaming_provider(self) -> bool:
@@ -157,7 +146,6 @@ class FabelProvider(MusicProvider):
         profile = str(self.get_setup_value(CONF_PROFILE_ID) or "")
         if not access and not refresh:
             raise SetupFailedError("Fabel access token or refresh token is required")
-        self._listen_state = {}
         self._api = FabelApi(
             self.mass.http_session,
             access_token=access or "pending",
@@ -166,6 +154,7 @@ class FabelProvider(MusicProvider):
             on_tokens_updated=self._persist_tokens,
             throttler=Throttler(rate_limit=API_RATE_LIMIT, period=API_RATE_PERIOD),
         )
+        self._tracker = ListeningTracker(self._api.report_listening_sessions)
         if not access and refresh:
             await self._api.refresh_access_token()
             self._persist_tokens()
@@ -364,7 +353,29 @@ class FabelProvider(MusicProvider):
             duration=duration or None,
         )
 
-    async def on_played(  # noqa: C901, PLR0913, PLR0917
+    async def unload(self, is_removed: bool = False) -> None:  # noqa: FBT001, FBT002
+        """Flush any queued listening sessions before the provider unloads."""
+        if self._tracker is not None:
+            await self._tracker.flush()
+        await super().unload(is_removed)
+
+    async def on_stream_started(self, streamdetails: StreamDetails) -> None:
+        """Anchor the listening interval at the exact seek position when audio starts."""
+        if self._tracker is None or streamdetails.media_type != MediaType.AUDIOBOOK:
+            return
+        await self._tracker.on_stream_started(
+            isbn=streamdetails.item_id,
+            start_position=int(streamdetails.seek_position or 0),
+            book_duration=int(streamdetails.duration or 0),
+        )
+
+    async def on_streamed(self, streamdetails: StreamDetails) -> None:
+        """Retry uploading any pending listening sessions when a stream completes."""
+        if self._tracker is None or streamdetails.media_type != MediaType.AUDIOBOOK:
+            return
+        await self._tracker.flush()
+
+    async def on_played(  # noqa: PLR0913, PLR0917
         self,
         media_type: MediaType,
         prov_item_id: str,
@@ -377,64 +388,23 @@ class FabelProvider(MusicProvider):
         Report listening progress so Fabel counts subscription hours.
 
         Music Assistant calls this about every 30s while playing, and on pause/stop.
-        We POST intervals to ``/listening-sessions/batch``.
+        Intervals are tracked in ``ListeningTracker`` and flushed via
+        ``POST /listening-sessions/batch`` with automatic retry on failure.
         """
-        if media_type != MediaType.AUDIOBOOK:
+        if self._tracker is None or media_type != MediaType.AUDIOBOOK:
             return
         if not isinstance(media_item, Audiobook):
             return
-
         book_duration = int(media_item.duration or 0)
         if book_duration <= 0:
             return
-
-        now = datetime.now(UTC)
-        position = max(0, int(position or 0))
-        if fully_played:
-            position = max(position, book_duration)
-
-        state = self._listen_state.get(prov_item_id)
-        if state is None:
-            # Start a new interval at the current position.
-            self._listen_state[prov_item_id] = _ListenReportState(
-                start_position=position,
-                started_at=now,
-                book_duration=book_duration,
-                last_position=position,
-            )
-            if is_playing and not fully_played:
-                return
-            # Immediate stop/finish with no prior open interval — nothing to report yet.
-            if position <= 0 and not fully_played:
-                self._listen_state.pop(prov_item_id, None)
-                return
-
-        state = self._listen_state[prov_item_id]
-        state.book_duration = book_duration or state.book_duration
-        end_position = max(state.last_position, position)
-
-        # Flush when playback stops/pauses/finishes, or when we have a meaningful advance.
-        should_flush = (not is_playing) or fully_played or (end_position > state.start_position)
-        if should_flush and end_position > state.start_position:
-            try:
-                await self._api.report_listening_session(
-                    isbn=prov_item_id,
-                    start_position=state.start_position,
-                    end_position=end_position,
-                    started_at=state.started_at,
-                    ended_at=now,
-                    book_duration=state.book_duration,
-                )
-            except Exception as err:  # noqa: BLE001
-                self.logger.warning("Fabel listening-session report failed: %s", err)
-            else:
-                # Continue from the reported end while still playing.
-                state.start_position = end_position
-                state.started_at = now
-
-        state.last_position = end_position
-        if not is_playing or fully_played:
-            self._listen_state.pop(prov_item_id, None)
+        await self._tracker.on_played(
+            isbn=prov_item_id,
+            position=max(0, int(position or 0)),
+            book_duration=book_duration,
+            fully_played=fully_played,
+            is_playing=is_playing,
+        )
 
     def _parse_audiobook(self, raw: dict[str, Any]) -> Audiobook | None:  # noqa: C901
         """Best-effort map of Eventyr book DTO → MA Audiobook."""
