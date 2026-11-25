@@ -51,6 +51,12 @@
       },
       "completed": {
         "name": "Fullført"
+      },
+      "discover": {
+        "name": "Utforsk"
+      },
+      "genres": {
+        "name": "Sjangre"
       }
     }
   },

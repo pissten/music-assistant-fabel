@@ -12,7 +12,7 @@ from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
-from urllib.parse import unquote
+from urllib.parse import quote, unquote
 
 from aiohttp import ClientError, ClientResponse, ClientSession
 from music_assistant_models.errors import (
@@ -25,9 +25,13 @@ from music_assistant_models.errors import (
 from music_assistant.helpers.throttle_retry import Throttler
 
 from .constants import (
+    ALGOLIA_APP_ID,
+    ALGOLIA_SEARCH_KEY,
+    ALGOLIA_SEARCH_URL,
     API_BASE,
     API_RATE_LIMIT,
     API_RATE_PERIOD,
+    CATALOG_CACHE_TTL_SECONDS,
     CDN_USER_AGENT,
     EP_ALLOWANCE,
     EP_AUTH_COMPLETE_SIGNIN,
@@ -35,19 +39,26 @@ from .constants import (
     EP_AUTH_TOKEN,
     EP_BOOK,
     EP_BOOK_CAN_LISTEN,
+    EP_BOOK_PROGRESS,
     EP_BOOK_STREAM_V2,
     EP_BOOKS_IN_PROGRESS,
     EP_BOOKSHELVES,
     EP_COMPLETED,
     EP_FAVORITES,
+    EP_GENRE_BOOKS,
+    EP_GENRES_V2,
+    EP_HOME_PAGE,
     EP_LISTENING_SESSIONS_BATCH,
     EP_ME,
     EP_PROFILES,
     EP_PROGRESS,
     HEADER_PROFILE_ID,
+    HEADER_PROFILE_TYPE,
+    HEADER_SUBSCRIPTION_PLAN,
     LIBRARY_CACHE_TTL_SECONDS,
     SMS_APP_HASH,
     USER_AGENT,
+    VALID_GENRE_PAGE_SIZES,
 )
 from .listening import ListeningSession
 
@@ -72,10 +83,14 @@ class FabelApi:
         self._access_token = access_token.strip()
         self._refresh_token = (refresh_token or "").strip() or None
         self._profile_id = (profile_id or "").strip() or None
+        self._profile_type: str | None = None
+        self._subscription_plan: str | None = None
+        self._only_adult_books: bool = False
         self._on_tokens_updated = on_tokens_updated
         self._throttler = throttler or Throttler(rate_limit=API_RATE_LIMIT, period=API_RATE_PERIOD)
         self._refresh_lock = asyncio.Lock()
         self._list_cache: dict[str, tuple[float, Any]] = {}
+        self._catalog_cache: dict[str, tuple[float, Any]] = {}
 
     @property
     def access_token(self) -> str:
@@ -115,7 +130,9 @@ class FabelApi:
         alphabet = string.ascii_lowercase + string.digits
         return "".join(secrets.choice(alphabet) for _ in range(length))
 
-    def _headers(self, *, require_profile: bool = False) -> dict[str, str]:
+    def _headers(
+        self, *, require_profile: bool = False, include_context: bool = False
+    ) -> dict[str, str]:
         headers = {
             "Authorization": f"Bearer {self._access_token}",
             "Accept": "application/json",
@@ -125,6 +142,11 @@ class FabelApi:
             headers[HEADER_PROFILE_ID] = self._profile_id
         elif require_profile:
             raise LoginFailed("Fabel profile id is required (x-profile-id)")
+        if include_context:
+            if self._profile_type:
+                headers[HEADER_PROFILE_TYPE] = self._profile_type
+            if self._subscription_plan:
+                headers[HEADER_SUBSCRIPTION_PLAN] = self._subscription_plan
         return headers
 
     @staticmethod
@@ -156,7 +178,7 @@ class FabelApi:
             raise MediaNotFoundError(f"Fabel resource not found: {resp.url}")
         raise ProviderUnavailableError(f"Fabel HTTP {resp.status}: {detail}")
 
-    async def request_json(
+    async def request_json(  # noqa: PLR0913
         self,
         method: str,
         path: str,
@@ -164,6 +186,7 @@ class FabelApi:
         json_data: Any | None = None,
         params: dict[str, str] | None = None,
         require_profile: bool = False,
+        include_context: bool = False,
     ) -> Any:
         """Perform an authenticated JSON request against the Eventyr API."""
         url = path if path.startswith("http") else f"{API_BASE}{path}"
@@ -174,7 +197,9 @@ class FabelApi:
                 self._session.request(
                     method,
                     url,
-                    headers=self._headers(require_profile=require_profile),
+                    headers=self._headers(
+                        require_profile=require_profile, include_context=include_context
+                    ),
                     json=json_data,
                     params=params,
                 ) as resp,
@@ -187,7 +212,9 @@ class FabelApi:
                         self._session.request(
                             method,
                             url,
-                            headers=self._headers(require_profile=require_profile),
+                            headers=self._headers(
+                                require_profile=require_profile, include_context=include_context
+                            ),
                             json=json_data,
                             params=params,
                         ) as retry,
@@ -364,9 +391,22 @@ class FabelApi:
         }
 
     async def get_me(self) -> dict[str, Any]:
-        """Return the authenticated user profile root."""
+        """Return the authenticated user profile root and capture subscription context."""
         payload = await self.request_json("GET", EP_ME)
-        return payload if isinstance(payload, dict) else {}
+        if not isinstance(payload, dict):
+            return {}
+        raw_sub = payload.get("subscription")
+        if isinstance(raw_sub, dict):
+            plan = str(raw_sub.get("planName") or "").strip()
+            if plan:
+                self._subscription_plan = plan
+            raw_features = raw_sub.get("features")
+            if isinstance(raw_features, list):
+                self._only_adult_books = any(
+                    isinstance(f, str) and f.strip().lower() == "only adult books"
+                    for f in raw_features
+                )
+        return payload
 
     async def get_profiles(self) -> list[dict[str, Any]]:
         """Return listening profiles for the account."""
@@ -381,9 +421,11 @@ class FabelApi:
         return []
 
     async def ensure_profile(self, preferred_id: str | None = None) -> str:
-        """Resolve and store a profile id for `x-profile-id`."""
+        """Resolve and store a profile id (and type) for `x-profile-id`."""
         if preferred_id:
             self._profile_id = preferred_id.strip()
+            if not self._profile_type:
+                await self._resolve_profile_type(self._profile_id)
             return self._profile_id
         if self._profile_id:
             return self._profile_id
@@ -404,8 +446,24 @@ class FabelApi:
         if not pid:
             raise LoginFailed("Fabel profile is missing id")
         self._profile_id = pid
-        LOGGER.info("Fabel using profile %s (%s)", pid, chosen.get("name"))
+        ptype = str(chosen.get("type") or "").strip().lower()
+        self._profile_type = ptype or None
+        LOGGER.info("Fabel using profile %s (%s, type=%s)", pid, chosen.get("name"), ptype or "?")
         return pid
+
+    async def _resolve_profile_type(self, profile_id: str) -> None:
+        """Best-effort lookup of the configured profile's type (adult/child)."""
+        try:
+            profiles = await self.get_profiles()
+        except Exception as err:  # noqa: BLE001
+            LOGGER.debug("Could not resolve profile type for %s: %s", profile_id, err)
+            return
+        for profile in profiles:
+            if str(profile.get("id") or "").strip() == profile_id:
+                ptype = str(profile.get("type") or "").strip().lower()
+                if ptype:
+                    self._profile_type = ptype
+                return
 
     async def _cached_list(self, key: str, path: str) -> Any:
         now = time.monotonic()
@@ -415,6 +473,168 @@ class FabelApi:
         payload = await self.request_json("GET", path, require_profile=True)
         self._list_cache[key] = (now, payload)
         return payload
+
+    async def _cached_catalog(
+        self,
+        key: str,
+        path: str,
+        *,
+        params: dict[str, str] | None = None,
+        use_cache: bool = True,
+    ) -> Any:
+        now = time.monotonic()
+        if use_cache:
+            cached = self._catalog_cache.get(key)
+            if cached and (now - cached[0]) < CATALOG_CACHE_TTL_SECONDS:
+                return cached[1]
+        payload = await self.request_json(
+            "GET",
+            path,
+            params=params,
+            require_profile=True,
+            include_context=True,
+        )
+        self._catalog_cache[key] = (now, payload)
+        return payload
+
+    async def search_books(self, query: str, *, limit: int = 20) -> list[dict[str, Any]]:
+        """Search the full Fabel catalogue via Algolia."""
+        clean_query = query.strip()
+        if not clean_query:
+            return []
+        hits_per_page = max(1, min(int(limit), 100))
+        body: dict[str, Any] = {
+            "query": clean_query,
+            "hitsPerPage": hits_per_page,
+        }
+        filters = build_algolia_filters(
+            profile_type=self._profile_type,
+            only_adult_books=self._only_adult_books,
+        )
+        if filters:
+            body["filters"] = filters
+        headers = {
+            "X-Algolia-Application-Id": ALGOLIA_APP_ID,
+            "X-Algolia-API-Key": ALGOLIA_SEARCH_KEY,
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "User-Agent": USER_AGENT,
+        }
+        try:
+            async with (
+                self._throttler,
+                self._session.post(ALGOLIA_SEARCH_URL, json=body, headers=headers) as resp,
+            ):
+                if resp.status >= 400:
+                    detail = self._extract_error_detail(await resp.text())
+                    raise ProviderUnavailableError(
+                        f"Fabel catalogue search error ({resp.status}): {detail}"
+                    )
+                payload = await resp.json(content_type=None)
+        except (ClientError, TimeoutError) as err:
+            raise ProviderUnavailableError(f"Fabel catalogue search failed: {err}") from err
+        if not isinstance(payload, dict):
+            return []
+        raw_hits = payload.get("hits")
+        if not isinstance(raw_hits, list):
+            return []
+        return [hit for hit in raw_hits if isinstance(hit, dict)]
+
+    async def get_home_page(self, *, use_cache: bool = True) -> dict[str, Any]:
+        """Return Fabel's curated home-page sections (Discover)."""
+        payload = await self._cached_catalog("home_page", EP_HOME_PAGE, use_cache=use_cache)
+        return payload if isinstance(payload, dict) else {}
+
+    async def get_genres(self, *, use_cache: bool = True) -> list[dict[str, Any]]:
+        """Return top-level catalogue genres from `/genresV2`."""
+        payload = await self._cached_catalog("genres_v2", EP_GENRES_V2, use_cache=use_cache)
+        if isinstance(payload, list):
+            return [g for g in payload if isinstance(g, dict)]
+        return []
+
+    async def get_genre_books(
+        self,
+        genre_id: str,
+        *,
+        page: int = 1,
+        page_size: int = 100,
+        use_cache: bool = True,
+    ) -> list[dict[str, Any]]:
+        """Return books in a genre (snapping `pageSize` to Eventyr's allowed values)."""
+        safe_page = max(1, int(page))
+        safe_size = _normalize_genre_page_size(page_size)
+        encoded = quote(genre_id, safe="")
+        payload = await self._cached_catalog(
+            f"genre:{genre_id}:{safe_page}:{safe_size}",
+            EP_GENRE_BOOKS.format(genre_id=encoded),
+            params={"page": str(safe_page), "pageSize": str(safe_size)},
+            use_cache=use_cache,
+        )
+        if isinstance(payload, list):
+            return [b for b in payload if isinstance(b, dict)]
+        if isinstance(payload, dict):
+            for key in ("items", "books", "data"):
+                val = payload.get(key)
+                if isinstance(val, list):
+                    return [b for b in val if isinstance(b, dict)]
+        return []
+
+    async def add_favorite(self, isbn: str) -> None:
+        """Add a book to the active Fabel profile's favorites."""
+        await self.request_json(
+            "POST",
+            EP_FAVORITES,
+            json_data={"book": isbn},
+            require_profile=True,
+            include_context=True,
+        )
+        self._list_cache.pop("favorites", None)
+
+    async def remove_favorite(self, isbn: str) -> None:
+        """Remove a book from the active Fabel profile's favorites (idempotent on 404)."""
+        try:
+            await self.request_json(
+                "DELETE",
+                EP_FAVORITES,
+                json_data={"book": isbn},
+                require_profile=True,
+                include_context=True,
+            )
+        except MediaNotFoundError:
+            LOGGER.debug("Fabel favorite %s already absent on server", isbn)
+        self._list_cache.pop("favorites", None)
+
+    async def mark_completed(self, isbn: str) -> None:
+        """Mark a book as completed for the active Fabel profile."""
+        await self.request_json(
+            "POST",
+            EP_COMPLETED,
+            json_data={"book": isbn},
+            require_profile=True,
+            include_context=True,
+        )
+        self._list_cache.pop("completed", None)
+        self._list_cache.pop("in_progress", None)
+
+    async def set_book_progress(
+        self,
+        isbn: str,
+        position: int,
+        *,
+        updated_at: datetime | None = None,
+    ) -> None:
+        """Sync the listening position (in seconds) for a book back to Fabel."""
+        safe_position = max(0, int(position))
+        ts = updated_at or datetime.now(UTC)
+        await self.request_json(
+            "PUT",
+            EP_BOOK_PROGRESS.format(isbn=quote(isbn, safe="")),
+            json_data={"position": safe_position, "updatedAt": _iso_z(ts)},
+            require_profile=True,
+            include_context=True,
+        )
+        self._list_cache.pop("progress", None)
+        self._list_cache.pop("in_progress", None)
 
     async def get_books_in_progress(self, *, use_cache: bool = True) -> Any:
         """Return books currently in progress for the profile."""
@@ -666,3 +886,21 @@ def parse_progress_map(payload: Any) -> dict[str, ProgressEntry]:
         updated_at = parse_iso_utc(item.get("updatedAt") or item.get("lastPlayedAt"))
         result[isbn] = ProgressEntry(position_seconds=pos, updated_at=updated_at)
     return result
+
+
+def build_algolia_filters(*, profile_type: str | None, only_adult_books: bool) -> str | None:
+    """Build Fabel's Algolia genre filter string for child profiles or adult-only plans."""
+    if (profile_type or "").strip().lower() == "child":
+        return 'primaryGenre:"Barn" OR primaryGenre:"Ungdom"'
+    if only_adult_books:
+        return 'NOT primaryGenre:"Barn" AND NOT primaryGenre:"Ungdom"'
+    return None
+
+
+def _normalize_genre_page_size(page_size: int) -> int:
+    """Snap `pageSize` to Eventyr's allowed values (10, 20, 30, 50, 100)."""
+    requested = max(1, int(page_size))
+    for allowed in VALID_GENRE_PAGE_SIZES:
+        if requested <= allowed:
+            return allowed
+    return VALID_GENRE_PAGE_SIZES[-1]

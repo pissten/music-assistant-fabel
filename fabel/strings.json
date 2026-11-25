@@ -51,6 +51,12 @@
       },
       "completed": {
         "name": "Completed"
+      },
+      "discover": {
+        "name": "Discover"
+      },
+      "genres": {
+        "name": "Genres"
       }
     }
   },
