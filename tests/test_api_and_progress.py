@@ -152,6 +152,7 @@ async def test_get_stream_details_surfaces_403_as_unplayable() -> None:
     provider._api = FabelApi(  # noqa: SLF001
         session,  # type: ignore[arg-type]
         access_token="tok-fresh",  # noqa: S106
+        profile_id="prof-1",
     )
 
     with pytest.raises(UnplayableMediaError, match="Subscription paused"):
