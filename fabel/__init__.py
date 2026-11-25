@@ -10,6 +10,7 @@ Streams via ``/api/book/{isbn}/streamV2`` → progressive ``.webm`` (Opus) on
 from __future__ import annotations
 
 from collections.abc import AsyncGenerator, Sequence
+from datetime import datetime
 from typing import TYPE_CHECKING, Any, cast
 
 from music_assistant_models.config_entries import ConfigEntry
@@ -24,6 +25,7 @@ from music_assistant_models.enums import (
 from music_assistant_models.errors import (
     LoginFailed,
     MediaNotFoundError,
+    ProviderPermissionDenied,
     SetupFailedError,
     UnplayableMediaError,
 )
@@ -43,7 +45,7 @@ from music_assistant_models.streamdetails import StreamDetails
 from music_assistant.helpers.throttle_retry import Throttler
 from music_assistant.models.music_provider import MusicProvider
 
-from .api import FabelApi, concurrent_streams_from_me
+from .api import FabelApi, ProgressEntry, concurrent_streams_from_me, parse_iso_utc
 from .constants import (
     API_RATE_LIMIT,
     API_RATE_PERIOD,
@@ -94,27 +96,25 @@ class FabelProvider(MusicProvider):
 
     async def get_config_entries(self) -> tuple[ConfigEntry, ...]:
         """Show Fabel listening allowance (spent / remaining hours) on the settings page."""
-        return (
-            ConfigEntry(
-                key="fabel_allowance",
-                type=ConfigEntryType.LABEL,
-                label=await self._allowance_label(),
-                category="generic",
-            ),
-        )
+        return (await self._allowance_config_entry(),)
 
-    async def _allowance_label(self) -> str:
-        """Build a human-readable allowance line from Eventyr `/me/allowance` (+ plan)."""
+    async def _allowance_config_entry(self) -> ConfigEntry:
+        """Build a localized allowance label entry from Eventyr `/me/allowance` (+ plan)."""
         try:
             me = await self._api.get_me()
             allowance_payload = await self._api.get_allowance()
         except Exception as err:  # noqa: BLE001
             self.logger.debug("Fabel allowance fetch failed: %s", err)
-            return "Lyttetid: kunne ikke hentes akkurat nå (prøv å åpne siden på nytt)."
+            return ConfigEntry(
+                key="fabel_allowance_unavailable",
+                type=ConfigEntryType.LABEL,
+                label="Listening time: currently unavailable (reopen settings to retry).",
+                category="generic",
+            )
 
         raw_sub = me.get("subscription")
         sub: dict[str, Any] = raw_sub if isinstance(raw_sub, dict) else {}
-        plan_name = str(sub.get("planName") or "").strip() or "ukjent plan"
+        plan_name = str(sub.get("planName") or "").strip() or "unknown plan"
         streams = concurrent_streams_from_me(me)
 
         block: dict[str, Any] = allowance_payload if isinstance(allowance_payload, dict) else {}
@@ -132,11 +132,24 @@ class FabelProvider(MusicProvider):
             actual = _as_int(allowance.get("actualAllowance")) or 0
             available_ms = max(0, actual - spent_ms)
 
-        spent_txt = _format_ms_duration(spent_ms)
-        left_txt = _format_ms_duration(available_ms)
-        return (
-            f"Lyttetid denne perioden: {spent_txt} brukt · {left_txt} igjen "
-            f"({plan_name}, max {streams} concurrent streams)."
+        spent_h, spent_m = _split_ms_duration(spent_ms)
+        left_h, left_m = _split_ms_duration(available_ms)
+        return ConfigEntry(
+            key="fabel_allowance",
+            type=ConfigEntryType.LABEL,
+            label=(
+                f"Listening time this period: {spent_h}h {spent_m}m used · "
+                f"{left_h}h {left_m}m remaining ({plan_name}, max {streams} concurrent streams)."
+            ),
+            translation_params=[
+                str(spent_h),
+                str(spent_m),
+                str(left_h),
+                str(left_m),
+                plan_name,
+                str(streams),
+            ],
+            category="generic",
         )
 
     async def handle_async_init(self) -> None:
@@ -193,6 +206,14 @@ class FabelProvider(MusicProvider):
         except Exception as err:  # noqa: BLE001
             self.logger.debug("Could not persist Fabel tokens: %s", err)
 
+    async def _safe_progress_map(self) -> dict[str, ProgressEntry]:
+        """Return cached ISBN → ProgressEntry map from Fabel without failing the caller."""
+        try:
+            return await self._api.get_progress_map(use_cache=True)
+        except Exception as err:  # noqa: BLE001
+            self.logger.debug("Fabel progress sync fetch failed: %s", err)
+            return {}
+
     async def search(
         self, search_query: str, media_types: list[MediaType], limit: int = 5
     ) -> SearchResults:
@@ -201,6 +222,7 @@ class FabelProvider(MusicProvider):
         if MediaType.AUDIOBOOK not in media_types:
             return result
         query = search_query.lower().strip()
+        progress_map = await self._safe_progress_map()
         books: list[Audiobook] = []
         for loader in (self._api.get_books_in_progress, self._api.get_favorites):
             try:
@@ -209,7 +231,7 @@ class FabelProvider(MusicProvider):
                 self.logger.debug("Fabel search source failed: %s", err)
                 continue
             for raw in _iter_book_dicts(payload):
-                book = self._parse_audiobook(raw)
+                book = self._parse_audiobook(raw, progress_map=progress_map)
                 if book and (not query or query in book.name.lower()):
                     books.append(book)
                 if len(books) >= limit:
@@ -220,22 +242,28 @@ class FabelProvider(MusicProvider):
         return result
 
     async def get_library_audiobooks(self) -> AsyncGenerator[Audiobook]:
-        """Yield in-progress, favorite and completed books."""
+        """Yield in-progress, favorite and completed books with Fabel progress."""
+        progress_map = await self._safe_progress_map()
         seen: set[str] = set()
-        for loader in (
-            self._api.get_books_in_progress,
-            self._api.get_favorites,
-            self._api.get_completed,
+        for loader, is_completed in (
+            (self._api.get_books_in_progress, False),
+            (self._api.get_favorites, None),
+            (self._api.get_completed, True),
         ):
             try:
                 payload = await loader(use_cache=True)
             except LoginFailed:
                 raise
+            except ProviderPermissionDenied as err:
+                self.logger.warning("Fabel denied library access: %s", err)
+                continue
             except Exception as err:  # noqa: BLE001
                 self.logger.warning("Fabel library fetch failed: %s", err)
                 continue
             for raw in _iter_book_dicts(payload):
-                book = self._parse_audiobook(raw)
+                book = self._parse_audiobook(
+                    raw, progress_map=progress_map, fully_played=is_completed
+                )
                 if not book or book.item_id in seen:
                     continue
                 seen.add(book.item_id)
@@ -245,13 +273,14 @@ class FabelProvider(MusicProvider):
         """Return one audiobook by ISBN via /api/book/{isbn}."""
         try:
             raw = await self._api.get_book(prov_audiobook_id)
-        except MediaNotFoundError:
-            raise
-        except LoginFailed:
+        except MediaNotFoundError, LoginFailed, ProviderPermissionDenied:
             raise
         except Exception as err:
             raise MediaNotFoundError(f"Fabel book not found: {prov_audiobook_id}") from err
-        book = self._parse_audiobook(raw if isinstance(raw, dict) else {})
+        progress_map = await self._safe_progress_map()
+        book = self._parse_audiobook(
+            raw if isinstance(raw, dict) else {}, progress_map=progress_map
+        )
         if book:
             return book
         raise MediaNotFoundError(f"Fabel book not found: {prov_audiobook_id}")
@@ -261,9 +290,9 @@ class FabelProvider(MusicProvider):
         Browse Fabel via the standard library folders.
 
         MA passes ``{instance_id}://…`` (not ``fabel://…``). Use the base MusicProvider
-        browse so «Lydbøker» and Bla gjennom stay in sync with the library.
+        browse so Audiobooks and Browse stay in sync with the library.
         """
-        # Custom folders (påbegynt/favoritter/fullført) as extra roots when at provider root.
+        # Custom folders (in_progress/favorites/completed) as extra roots when at provider root.
         path_parts = path.split("://", 1)
         subpath = ""
         if len(path_parts) == 2:
@@ -278,9 +307,9 @@ class FabelProvider(MusicProvider):
             if "://" not in root:
                 root = f"{self.instance_id}://"
             for key, name in (
-                ("in_progress", "Påbegynt"),
-                ("favorites", "Favoritter"),
-                ("completed", "Fullført"),
+                ("in_progress", "In progress"),
+                ("favorites", "Favorites"),
+                ("completed", "Completed"),
             ):
                 folders.append(
                     BrowseFolder(
@@ -288,6 +317,7 @@ class FabelProvider(MusicProvider):
                         provider=self.instance_id,
                         path=f"{root}{key}",
                         name=name,
+                        translation_key=key,
                     )
                 )
             return folders
@@ -299,9 +329,13 @@ class FabelProvider(MusicProvider):
                 "completed": self._api.get_completed,
             }[subpath]
             payload = await loader(use_cache=True)
+            progress_map = await self._safe_progress_map()
+            is_completed: bool | None = True if subpath == "completed" else None
             books: list[Audiobook] = []
             for raw in _iter_book_dicts(payload):
-                book = self._parse_audiobook(raw)
+                book = self._parse_audiobook(
+                    raw, progress_map=progress_map, fully_played=is_completed
+                )
                 if book:
                     books.append(book)
             return books
@@ -318,8 +352,10 @@ class FabelProvider(MusicProvider):
 
         try:
             stream = await self._api.get_book_stream(item_id)
-        except MediaNotFoundError:
+        except MediaNotFoundError, LoginFailed:
             raise
+        except ProviderPermissionDenied as err:
+            raise UnplayableMediaError(str(err)) from err
         except Exception as err:
             raise UnplayableMediaError(f"Fabel streamV2 failed for {item_id}: {err}") from err
 
@@ -406,8 +442,27 @@ class FabelProvider(MusicProvider):
             is_playing=is_playing,
         )
 
-    def _parse_audiobook(self, raw: dict[str, Any]) -> Audiobook | None:  # noqa: C901
-        """Best-effort map of Eventyr book DTO → MA Audiobook."""
+    def _parse_audiobook(  # noqa: C901
+        self,
+        raw: dict[str, Any],
+        *,
+        progress_map: dict[str, ProgressEntry] | None = None,
+        fully_played: bool | None = None,
+        _wrapper_position: int | None = None,
+        _wrapper_status: str | None = None,
+        _wrapper_updated_at: datetime | None = None,
+    ) -> Audiobook | None:
+        """Best-effort map of Eventyr book DTO → MA Audiobook (with resume position)."""
+        wrapper_pos = (
+            _wrapper_position
+            if _wrapper_position is not None
+            else _as_int(raw.get("currentPosition"))
+        )
+        wrapper_status = _wrapper_status or str(raw.get("status") or "").strip().lower()
+        wrapper_updated_at = _wrapper_updated_at or parse_iso_utc(
+            raw.get("updatedAt") or raw.get("lastPlayedAt")
+        )
+
         # Prefer ISBN: streamV2 and CDN are keyed by isbn.
         book_id = str(
             raw.get("isbn") or raw.get("id") or raw.get("bookId") or raw.get("uuid") or ""
@@ -416,7 +471,14 @@ class FabelProvider(MusicProvider):
         if not book_id or not title:
             nested = raw.get("book") if isinstance(raw.get("book"), dict) else None
             if nested:
-                return self._parse_audiobook(nested)
+                return self._parse_audiobook(
+                    nested,
+                    progress_map=progress_map,
+                    fully_played=fully_played,
+                    _wrapper_position=wrapper_pos,
+                    _wrapper_status=wrapper_status,
+                    _wrapper_updated_at=wrapper_updated_at,
+                )
             return None
 
         authors = _as_name_list(raw.get("authors") or raw.get("author"))
@@ -469,7 +531,7 @@ class FabelProvider(MusicProvider):
             end = _as_float(ch.get("end"))
             kwargs: dict[str, Any] = {
                 "position": idx + 1,
-                "name": str(ch.get("title") or ch.get("name") or f"Kapittel {idx + 1}"),
+                "name": str(ch.get("title") or ch.get("name") or f"Chapter {idx + 1}"),
                 "start": _as_float(ch.get("start") or ch.get("position") or 0) or 0.0,
             }
             if end is not None:
@@ -482,7 +544,44 @@ class FabelProvider(MusicProvider):
         if chapters:
             book.metadata.chapters = chapters
 
+        _apply_resume_state(
+            book,
+            entry=progress_map.get(book_id) if progress_map else None,
+            wrapper_pos=wrapper_pos,
+            wrapper_status=wrapper_status,
+            wrapper_updated_at=wrapper_updated_at,
+            fully_played=fully_played,
+        )
         return book
+
+
+def _apply_resume_state(  # noqa: PLR0913
+    book: Audiobook,
+    *,
+    entry: ProgressEntry | None,
+    wrapper_pos: int | None,
+    wrapper_status: str,
+    wrapper_updated_at: datetime | None,
+    fully_played: bool | None,
+) -> None:
+    """Apply Fabel resume position, completion state and timestamp onto ``book``."""
+    updated_at = (entry.updated_at if entry else None) or wrapper_updated_at
+    if fully_played is True or wrapper_status == "completed":
+        book.fully_played = True
+        book.resume_position_ms = 0
+        if updated_at is not None:
+            book.resume_position_timestamp = updated_at
+        return
+
+    pos_sec = entry.position_seconds if entry is not None else wrapper_pos
+    if pos_sec is not None and pos_sec > 0:
+        pos_ms = pos_sec * 1000
+        if book.duration > 0:
+            pos_ms = min(pos_ms, book.duration * 1000)
+        book.resume_position_ms = pos_ms
+        book.fully_played = False
+        if updated_at is not None:
+            book.resume_position_timestamp = updated_at
 
 
 def _safe_user_label(me: dict[str, Any]) -> str:
@@ -533,15 +632,20 @@ def _as_int(value: Any) -> int | None:
         return None
 
 
-def _format_ms_duration(ms: int) -> str:
-    """Format Eventyr millisecond durations as 'X t Y min' (or just minutes)."""
+def _split_ms_duration(ms: int) -> tuple[int, int]:
+    """Split an Eventyr millisecond duration into whole ``(hours, minutes)``."""
     total_minutes = max(0, int(ms) // 60_000)
-    hours, minutes = divmod(total_minutes, 60)
+    return divmod(total_minutes, 60)
+
+
+def _format_ms_duration(ms: int) -> str:
+    """Format Eventyr millisecond durations as 'Xh Ym' (or just hours/minutes)."""
+    hours, minutes = _split_ms_duration(ms)
     if hours and minutes:
-        return f"{hours} t {minutes} min"
+        return f"{hours}h {minutes}m"
     if hours:
-        return f"{hours} t"
-    return f"{minutes} min"
+        return f"{hours}h"
+    return f"{minutes}m"
 
 
 def _as_float(value: Any) -> float | None:

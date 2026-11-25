@@ -1,0 +1,62 @@
+{
+  "manifest": {
+    "name": "Fabel",
+    "description": "Strøm lydbøker fra et norsk Fabel-abonnement (uoffisiell community-provider)."
+  },
+  "setup_flow": {
+    "phone": {
+      "title": "Fabel-innlogging",
+      "description": "Logg inn med samme norske mobilnummer som i Fabel-appen. Du må godta Fabels vilkår før vi sender SMS-kode. Bare eksisterende abonnement støttes."
+    },
+    "otp": {
+      "title": "SMS-kode",
+      "description": "Skriv inn engangskoden du fikk på SMS."
+    },
+    "profile": {
+      "title": "Lytteprofil",
+      "description": "Velg hvilken Fabel-profil som skal brukes (sendes i x-profile-id)."
+    }
+  },
+  "config_entries": {
+    "phone_number": {
+      "label": "Mobilnummer",
+      "description": "Norsk mobilnummer brukt i Fabel-appen (8 siffer eller +47…)."
+    },
+    "accept_terms": {
+      "label": "Jeg godtar Fabels vilkår og personvern",
+      "description": "Les Fabels [vilkår](https://fabel.no/vilkar) og [personvern](https://fabel.no/personvern) før du fortsetter. Det sendes bare SMS-kode til et eksisterende abonnement — det opprettes ikke ny Fabel-konto her."
+    },
+    "otp_code": {
+      "label": "SMS-kode",
+      "description": "Engangskoden du får på SMS."
+    },
+    "profile_id": {
+      "label": "Lytteprofil",
+      "description": "Brukes i headeren x-profile-id for strømming og bibliotek."
+    },
+    "fabel_allowance": {
+      "label": "Lyttetid denne perioden: {0} t {1} min brukt · {2} t {3} min igjen ({4}, maks {5} samtidige strømmer)."
+    },
+    "fabel_allowance_unavailable": {
+      "label": "Lyttetid: kunne ikke hentes akkurat nå (åpne innstillingene på nytt for å prøve igjen)."
+    }
+  },
+  "media": {
+    "folder": {
+      "in_progress": {
+        "name": "Påbegynt"
+      },
+      "favorites": {
+        "name": "Favoritter"
+      },
+      "completed": {
+        "name": "Fullført"
+      }
+    }
+  },
+  "errors": {
+    "enter_phone_number": "Oppgi et mobilnummer.",
+    "accept_terms": "Du må godta Fabels vilkår og personvern for å fortsette.",
+    "no_profiles": "Fant ingen lytteprofiler på denne kontoen."
+  }
+}

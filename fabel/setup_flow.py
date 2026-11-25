@@ -1,4 +1,4 @@
-"""Setup flow for the Fabel provider — SMS OTP (same UX as Fabel-appen / Min Konto)."""
+"""Setup flow for the Fabel provider — SMS OTP (same UX as the Fabel app)."""
 
 from __future__ import annotations
 
@@ -35,8 +35,8 @@ _PHONE_ENTRY = ConfigEntry(
     key=CONF_PHONE_NUMBER,
     type=ConfigEntryType.STRING,
     required=True,
-    label="Mobilnummer",
-    description="Norsk mobilnummer brukt i Fabel-appen (8 siffer eller +47…).",
+    label="Mobile number",
+    description="Norwegian mobile number used in the Fabel app (8 digits or +47...).",
 )
 
 _ACCEPT_TERMS_ENTRY = ConfigEntry(
@@ -44,11 +44,11 @@ _ACCEPT_TERMS_ENTRY = ConfigEntry(
     type=ConfigEntryType.BOOLEAN,
     required=True,
     default_value=False,
-    label="Jeg godtar Fabels vilkår og personvern",
+    label="I accept Fabel's terms and privacy policy",
     description=(
-        f"Les [vilkår]({FABEL_TERMS_URL}) og [personvern]({FABEL_PRIVACY_URL}) "
-        "før du fortsetter. Vi sender bare SMS-kode til et eksisterende abonnement — "
-        "det opprettes ikke ny Fabel-konto her."
+        f"Review Fabel's [terms]({FABEL_TERMS_URL}) and [privacy policy]({FABEL_PRIVACY_URL}) "
+        "before continuing. Only sends an SMS code to an existing Fabel subscription — "
+        "no new account is created."
     ),
 )
 
@@ -56,8 +56,8 @@ _OTP_ENTRY = ConfigEntry(
     key=CONF_OTP_CODE,
     type=ConfigEntryType.STRING,
     required=True,
-    label="SMS-kode",
-    description="Engangskoden du får på SMS.",
+    label="SMS code",
+    description="One-time verification code received by SMS.",
 )
 
 
@@ -71,7 +71,7 @@ def _otp_client(session: SetupSession) -> FabelApi:
 
 async def run_setup(session: SetupSession) -> None:  # noqa: C901, PLR0912, PLR0915
     """Phone + terms → SMS OTP → Eventyr tokens → pick profile."""
-    errors: dict[str, str] | None = None
+    errors: dict[str, str | SetupFlowError] | None = None
     setup_data = dict(session.context.setup_data)
 
     # --- Step 1: phone number + explicit terms acceptance ---
@@ -93,10 +93,20 @@ async def run_setup(session: SetupSession) -> None:  # noqa: C901, PLR0912, PLR0
         phone = str(setup_data.get(CONF_PHONE_NUMBER) or "").strip()
         accepted = bool(setup_data.get(CONF_ACCEPT_TERMS))
         if not phone:
-            errors = {"base": "oppgi_mobilnummer"}
+            errors = {
+                "base": SetupFlowError(
+                    "Please enter your mobile number.",
+                    translation_key="enter_phone_number",
+                )
+            }
             continue
         if not accepted:
-            errors = {"base": "godta_vilkar"}
+            errors = {
+                "base": SetupFlowError(
+                    "Please accept Fabel's terms and privacy policy before continuing.",
+                    translation_key="accept_terms",
+                )
+            }
             continue
 
         api = _otp_client(session)
@@ -149,11 +159,14 @@ async def run_setup(session: SetupSession) -> None:  # noqa: C901, PLR0912, PLR0
             errors = {"base": str(err)}
 
     if not profiles:
-        raise SetupFlowError("ingen_profiler")
+        raise SetupFlowError(
+            "No Fabel listening profiles were found for this account.",
+            translation_key="no_profiles",
+        )
 
     options = [
         ConfigValueOption(
-            f"{p.get('name') or 'Profil'} ({p.get('type') or '?'})",
+            f"{p.get('name') or 'Profile'} ({p.get('type') or '?'})",
             str(p.get("id")),
         )
         for p in profiles
@@ -174,8 +187,8 @@ async def run_setup(session: SetupSession) -> None:  # noqa: C901, PLR0912, PLR0
         key=CONF_PROFILE_ID,
         type=ConfigEntryType.STRING,
         required=True,
-        label="Lytteprofil",
-        description="Brukes i header x-profile-id på stream og bibliotek.",
+        label="Listening profile",
+        description="Sent in the x-profile-id header for streams and library requests.",
         options=options,
         default_value=preferred,
         value=existing if existing in {o.value for o in options} else preferred,
@@ -193,7 +206,7 @@ async def run_setup(session: SetupSession) -> None:  # noqa: C901, PLR0912, PLR0
             setup_data.pop(CONF_ACCEPT_TERMS, None)
             await session.finish(setup_data)
         except SetupFlowError as err:
-            errors = {"base": err.translation_key or str(err)}
+            errors = {"base": err if err.translation_key else str(err)}
             profile_entry = replace(profile_entry, value=setup_data.get(CONF_PROFILE_ID))
         else:
             return
