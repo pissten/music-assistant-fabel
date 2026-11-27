@@ -81,3 +81,6 @@ API_RATE_PERIOD = 1.0
 USER_AGENT = "MusicAssistant-Fabel/0.2.0 (compatible; Fabel/2.1.6)"
 # Match official app for CDN / auth
 CDN_USER_AGENT = "okhttp/4.12.0"
+# Seconds a streamV2 mac/timestamp pair is reused before Music Assistant fetches a new one.
+# The CDN refuses a pair after 60-90 s (measured 2026-11-27), so stay well below that.
+CDN_TOKEN_TTL = 45

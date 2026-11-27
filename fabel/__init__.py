@@ -50,6 +50,7 @@ from .api import FabelApi, ProgressEntry, concurrent_streams_from_me, parse_iso_
 from .constants import (
     API_RATE_LIMIT,
     API_RATE_PERIOD,
+    CDN_TOKEN_TTL,
     CONF_ACCESS_TOKEN,
     CONF_PROFILE_ID,
     CONF_REFRESH_TOKEN,
@@ -545,6 +546,9 @@ class FabelProvider(MusicProvider):
             can_seek=True,
             allow_seek=True,
             duration=duration or None,
+            # The CDN refuses a mac/timestamp pair after 60-90 s, so a resume or seek that
+            # opens the source again must fetch a fresh streamV2 instead of reusing these.
+            expiration=CDN_TOKEN_TTL,
         )
 
     async def unload(self, is_removed: bool = False) -> None:  # noqa: FBT001, FBT002
