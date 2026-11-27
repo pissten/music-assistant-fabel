@@ -61,6 +61,22 @@ _OTP_ENTRY = ConfigEntry(
 )
 
 
+def profile_options(profiles: list[dict[str, Any]]) -> list[ConfigValueOption]:
+    """
+    Return the options of the profile picker: the profile id as value, its name and type as title.
+
+    :param profiles: The profiles from ``/me/profiles``.
+    """
+    return [
+        ConfigValueOption(
+            value=str(p.get("id")),
+            title=f"{p.get('name') or 'Profile'} ({p.get('type') or '?'})",
+        )
+        for p in profiles
+        if p.get("id")
+    ]
+
+
 def _otp_client(session: SetupSession) -> FabelApi:
     return FabelApi(
         session.mass.http_session,
@@ -164,14 +180,7 @@ async def run_setup(session: SetupSession) -> None:  # noqa: C901, PLR0912, PLR0
             translation_key="no_profiles",
         )
 
-    options = [
-        ConfigValueOption(
-            f"{p.get('name') or 'Profile'} ({p.get('type') or '?'})",
-            str(p.get("id")),
-        )
-        for p in profiles
-        if p.get("id")
-    ]
+    options = profile_options(profiles)
     preferred = next(
         (
             str(p["id"])
