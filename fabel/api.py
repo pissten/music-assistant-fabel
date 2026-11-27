@@ -12,7 +12,7 @@ from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
-from urllib.parse import quote, unquote
+from urllib.parse import quote
 
 from aiohttp import ClientError, ClientResponse, ClientSession
 from music_assistant_models.errors import (
@@ -784,7 +784,10 @@ class FabelApi:
             raise MediaNotFoundError("Fabel streamV2 returned no url")
         headers: dict[str, str] = {"User-Agent": CDN_USER_AGENT, "Accept": "*/*"}
         if mac and timestamp is not None:
-            headers["mac"] = unquote(mac)
+            # Send the mac exactly as streamV2 returns it (percent-encoded), like the official
+            # apps. The CDN decodes it itself: a decoded "+" (from "%2B") is read as a space
+            # and the request is refused with 403.
+            headers["mac"] = mac
             headers["timestamp"] = str(timestamp)
         duration = int(stream.get("duration") or 0)
         return base, headers, duration
